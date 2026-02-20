@@ -44,7 +44,7 @@ mlmi4_advanced_ml/
 From the project root:
 
 ```bash
-cd mlmi4_advanced_ml/mlmi4_advanced_ml
+cd mlmi4_advanced_ml
 python -m venv mlmi4_env
 source mlmi4_env/bin/activate  # On Windows: mlmi4_env\Scripts\activate
 pip install -r requirements.txt
