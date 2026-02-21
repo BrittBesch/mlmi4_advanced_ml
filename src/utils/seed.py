@@ -1,6 +1,6 @@
 # Set seed for reproducibility
 
-def set_seed(seed: int):
+def set_seed(seed: int = 42):
     import random
     import numpy as np
     import torch
