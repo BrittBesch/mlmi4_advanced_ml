@@ -1,0 +1,21 @@
+# CUB-200-2011 zero-shot experiment (Table 3 replication)
+
+data:
+  root: "data/CUB_200_2011"
+  image_size: 224
+  batch_size: 32
+  num_workers: 0
+
+model:
+  z_dim: 1024
+  attr_dim: 312
+
+training:
+  epochs: 100
+  lr: 0.0001
+
+experiment:
+  seed: 42
+  save_dir: "experiments/checkpoints"
+  exp_name: "cub_zeroshot"
+  results_dir: "experiments/results"
