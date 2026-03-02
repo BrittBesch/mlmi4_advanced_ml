@@ -31,6 +31,109 @@ def euclidean_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.pow(x - y, 2).sum(2)
 
 
+# ============================================================
+# EXTENSION: Learnable Mahalanobis distance variants
+# ============================================================
+#
+# Background
+# ----------
+# Euclidean distance treats every embedding dimension equally:
+#     d²(x, y) = ||x - y||²  =  (x-y)ᵀ I (x-y)
+#
+# Mahalanobis distance replaces the identity with a learned PSD matrix M:
+#     d²(x, y) = (x-y)ᵀ M (x-y),  M = LᵀL ≥ 0
+#
+# For zero-shot learning this is especially useful: prototypes are built
+# from *attribute* vectors, not visual examples, so the natural geometry
+# of the embedding space may not align with Euclidean distance. Letting
+# the model learn a better metric directly compensates for that gap.
+#
+# Experiments
+# -----------
+#   Experiment 1 (baseline)  : --distance euclidean  → standard Euclidean (0 extra params)
+#   Experiment 2 (EXTENSION) : --distance diagonal   → diagonal M        (d extra params)
+#   Experiment 3 (EXTENSION) : --distance lowrank    → low-rank M        (d×r extra params)
+
+
+class DiagonalMahalanobisDistance(nn.Module):
+    """
+    EXTENSION – Experiment 2: Diagonal Mahalanobis distance.
+
+    M = diag(s²),  so  d²(x, y) = Σᵢ sᵢ² (xᵢ - yᵢ)²  =  ||s ⊙ (x-y)||²
+
+    This is identical to Euclidean distance after a learned per-dimension
+    rescaling s = exp(log_s).  Because each dimension gets its own scale
+    factor, the model can up-weight informative embedding dimensions and
+    down-weight noisy ones.
+
+    Parameters: d  (one log-scale per embedding dimension)
+    Initialisation: log_s = 0 → s = 1 → identical to Euclidean at the
+    start of training, so switching from Euclidean baseline is safe.
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        # Stored in log-space to keep s strictly positive during optimisation.
+        self.log_scale = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (N, D) query embeddings
+            y: (M, D) prototype embeddings
+        Returns:
+            (N, M) diagonal Mahalanobis distances
+        """
+        s = self.log_scale.exp()          # (D,) per-dimension positive scale
+        xs = x * s                         # (N, D) scaled queries
+        ys = y * s                         # (M, D) scaled prototypes
+        n, d = xs.size(0), xs.size(1)
+        m = ys.size(0)
+        xs = xs.unsqueeze(1).expand(n, m, d)
+        ys = ys.unsqueeze(0).expand(n, m, d)
+        return torch.pow(xs - ys, 2).sum(2)
+
+
+class LowRankMahalanobisDistance(nn.Module):
+    """
+    EXTENSION – Experiment 3: Low-rank Mahalanobis distance.
+
+    M = LᵀL where L has shape (rank, dim), so:
+        d²(x, y) = (x-y)ᵀ LᵀL (x-y)  =  ||L(x-y)||²
+
+    Unlike the diagonal variant this can capture *correlations* between
+    embedding dimensions.  Using a low rank (r ≪ d) keeps the parameter
+    count manageable and acts as implicit regularisation:
+        r=64, d=1024  →  65,536 extra parameters (vs 1,048,576 for full M)
+
+    Parameters: rank × dim
+    Initialisation: small random weights scaled by 1/√d so that the
+    projected distances start in a similar range to Euclidean distances.
+    """
+
+    def __init__(self, dim: int, rank: int = 64):
+        super().__init__()
+        # L: (rank, dim) projection matrix.  LᵀL is the metric tensor.
+        self.L = nn.Parameter(torch.randn(rank, dim) * (1.0 / dim ** 0.5))
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (N, D) query embeddings
+            y: (M, D) prototype embeddings
+        Returns:
+            (N, M) low-rank Mahalanobis distances
+        """
+        # Project both sets into rank-dimensional space via L.
+        xL = x @ self.L.t()               # (N, rank)
+        yL = y @ self.L.t()               # (M, rank)
+        n, r = xL.size(0), xL.size(1)
+        m = yL.size(0)
+        xL = xL.unsqueeze(1).expand(n, m, r)
+        yL = yL.unsqueeze(0).expand(n, m, r)
+        return torch.pow(xL - yL, 2).sum(2)
+
+
 def prototypical_loss(
     embeddings: torch.Tensor,
     labels: torch.Tensor,

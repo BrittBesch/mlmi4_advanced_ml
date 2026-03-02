@@ -21,11 +21,21 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from loss import prototypical_loss_from_prototypes, euclidean_dist
+from loss import (
+    prototypical_loss_from_prototypes,
+    euclidean_dist,
+    DiagonalMahalanobisDistance,   # EXTENSION – Experiment 2
+    LowRankMahalanobisDistance,    # EXTENSION – Experiment 3
+)
 from src.data_loader.dataloader_cub import get_cub_dataloaders
 from src.utils.device import get_device
 from src.utils.seed import set_seed
 
+
+# NOTE (Britt / models.py):
+# The following two classes define the *model* components used in the CUB
+# zero-shot experiment and could be moved into `model.py` to be shared by
+# multiple training scripts. They are kept here for now for clarity.
 
 class CUBImageEncoder(nn.Module):
     """
@@ -86,41 +96,85 @@ def _l2_normalize(x: torch.Tensor, dim: int = 1, eps: float = 1e-8) -> torch.Ten
     return x / (x.norm(p=2, dim=dim, keepdim=True) + eps)
 
 
-def train_epoch(model_enc, model_attr, attributes_split, optimizer, loader, device):
+def train_epoch(model_enc, model_attr, attributes_split, optimizer, loader, device,
+                distance_fn=None):
+    """
+    Run one training epoch.
+
+    distance_fn controls which distance metric is used to compare image
+    embeddings to class prototypes:
+      - None / euclidean_dist  →  Experiment 1: paper baseline
+      - DiagonalMahalanobisDistance instance  →  Experiment 2: EXTENSION
+      - LowRankMahalanobisDistance  instance  →  Experiment 3: EXTENSION
+
+    Note: prototypes are recomputed inside every batch loop so that
+    model_attr receives gradients and actually learns.  (Computing them
+    once outside the loop with torch.no_grad() would silently block all
+    gradients from reaching model_attr.)
+    """
+    if distance_fn is None:
+        distance_fn = euclidean_dist
+
     model_enc.train()
     model_attr.train()
+    # If distance_fn is a learnable module, set it to train mode too.
+    if isinstance(distance_fn, nn.Module):
+        distance_fn.train()
+
     total_loss = 0.0
     total_acc = 0.0
     n_batches = 0
-    # Prototypes for current split: normalize to unit length as in the paper
-    with torch.no_grad():
-        att = torch.tensor(attributes_split, dtype=torch.float32, device=device)
-        prototypes = _l2_normalize(model_attr(att))
+
+    # Convert fixed class attributes to a tensor once (they don't change).
+    att = torch.tensor(attributes_split, dtype=torch.float32, device=device)
+
     for images, labels in tqdm(loader, desc="Train", leave=False):
         images = images.to(device)
         labels = labels.to(device)
         optimizer.zero_grad()
-        z = model_enc(images)
-        loss, acc = prototypical_loss_from_prototypes(z, prototypes, labels, distance_fn=euclidean_dist)
+
+        # Recompute prototypes each step so gradients flow back through
+        # model_attr.  L2-normalise as in the paper (unit-length prototypes).
+        prototypes = _l2_normalize(model_attr(att))   # (n_classes, z_dim)
+
+        z = model_enc(images)                          # (B, z_dim)
+        loss, acc = prototypical_loss_from_prototypes(
+            z, prototypes, labels, distance_fn=distance_fn
+        )
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
         total_acc += acc.item()
         n_batches += 1
+
     return total_loss / max(n_batches, 1), total_acc / max(n_batches, 1)
 
 
 @torch.no_grad()
-def evaluate(model_enc, model_attr, attributes_unseen, loader, device):
+def evaluate(model_enc, model_attr, attributes_unseen, loader, device,
+             distance_fn=None):
+    """
+    Evaluate zero-shot accuracy on unseen classes.
+
+    Pass the *same* distance_fn used during training so the learned metric
+    is applied at inference time.  Defaults to euclidean_dist.
+    """
+    if distance_fn is None:
+        distance_fn = euclidean_dist
+
     model_enc.eval()
     model_attr.eval()
+    if isinstance(distance_fn, nn.Module):
+        distance_fn.eval()
+
     att = torch.tensor(attributes_unseen, dtype=torch.float32, device=device)
-    prototypes = _l2_normalize(model_attr(att))
+    prototypes = _l2_normalize(model_attr(att))   # (n_unseen, z_dim)
+
     total, correct = 0, 0
     for images, labels in loader:
         images = images.to(device)
-        z = model_enc(images)
-        dists = euclidean_dist(z, prototypes)
+        z = model_enc(images)                      # (B, z_dim)
+        dists = distance_fn(z, prototypes)         # (B, n_unseen)
         pred = dists.argmin(1)
         correct += (pred.cpu() == labels).sum().item()
         total += labels.size(0)
@@ -147,6 +201,23 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="experiments/checkpoints")
     parser.add_argument("--exp_name", type=str, default="cub_zeroshot")
+
+    # EXTENSION: distance metric selection
+    # Experiment 1: --distance euclidean  (paper baseline, no extra parameters)
+    # Experiment 2: --distance diagonal   (diagonal Mahalanobis, d extra params)
+    # Experiment 3: --distance lowrank    (low-rank Mahalanobis, d×r extra params)
+    parser.add_argument(
+        "--distance", type=str, default="euclidean",
+        choices=["euclidean", "diagonal", "lowrank"],
+        help="Distance metric to use.  'euclidean' reproduces the paper; "
+             "'diagonal' and 'lowrank' are EXTENSION experiments.",
+    )
+    parser.add_argument(
+        "--lowrank_r", type=int, default=64,
+        help="EXTENSION: rank r for low-rank Mahalanobis (only used when "
+             "--distance=lowrank).  r=64 gives 64×1024=65 536 extra params.",
+    )
+
     args = parser.parse_args()
 
     cfg = load_config(args.config or os.path.join(PROJECT_ROOT, "configs", "cub_config.yaml"))
@@ -185,8 +256,33 @@ def main():
 
     model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
     model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
+
+    # ---- EXTENSION: distance metric ------------------------------------------
+    # Build the distance callable.  For Mahalanobis variants the callable is an
+    # nn.Module with learnable parameters that are added to the optimizer below.
+    # Experiment 1 (baseline) : --distance euclidean  → no extra module/params
+    # Experiment 2 (EXTENSION): --distance diagonal   → DiagonalMahalanobisDistance
+    # Experiment 3 (EXTENSION): --distance lowrank    → LowRankMahalanobisDistance
+    def _build_distance(z_dim, args, device):
+        if args.distance == "euclidean":
+            return euclidean_dist          # plain function, no parameters
+        if args.distance == "diagonal":
+            return DiagonalMahalanobisDistance(dim=z_dim).to(device)
+        if args.distance == "lowrank":
+            return LowRankMahalanobisDistance(dim=z_dim, rank=args.lowrank_r).to(device)
+        raise ValueError(f"Unknown distance: {args.distance}")
+
+    distance_fn = _build_distance(args.z_dim, args, device)
+
+    # Collect learnable parameters from the distance module (empty list for Euclidean).
+    dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
+    print(f"Distance metric : {args.distance}"
+          + (f"  (rank={args.lowrank_r})" if args.distance == "lowrank" else ""))
+    print(f"Distance params : {sum(p.numel() for p in dist_params)}")
+    # --------------------------------------------------------------------------
+
     optimizer = torch.optim.Adam(
-        list(model_enc.parameters()) + list(model_attr.parameters()),
+        list(model_enc.parameters()) + list(model_attr.parameters()) + dist_params,
         lr=args.lr,
         weight_decay=1e-5,
     )
@@ -198,12 +294,15 @@ def main():
     # Phase 1: train on train classes, early-stop on val loss (as in paper)
     for epoch in range(args.epochs):
         train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train, optimizer, train_loader, device
+            model_enc, model_attr, attrs_train, optimizer, train_loader, device,
+            distance_fn=distance_fn,   # pass chosen metric (Exp 1/2/3)
         )
 
-        # Validation loss on val classes
+        # Validation loss on val classes (same metric as training)
         model_enc.eval()
         model_attr.eval()
+        if isinstance(distance_fn, nn.Module):
+            distance_fn.eval()
         with torch.no_grad():
             att_val = torch.tensor(attrs_val, dtype=torch.float32, device=device)
             prototypes_val = _l2_normalize(model_attr(att_val))
@@ -214,7 +313,7 @@ def main():
                 labels = labels.to(device)
                 z = model_enc(images)
                 loss, _ = prototypical_loss_from_prototypes(
-                    z, prototypes_val, labels, distance_fn=euclidean_dist
+                    z, prototypes_val, labels, distance_fn=distance_fn
                 )
                 val_loss += loss.item()
                 n_batches += 1
@@ -238,34 +337,49 @@ def main():
     )
     attrs_train_val = attributes[:150]  # 100 train + 50 val
 
-    # Reinitialize models and optimizer
+    # Reinitialise models, distance module, and optimizer from scratch.
+    # Phase 2 must start from the same initial conditions as Phase 1 so
+    # that training for best_epoch steps is a faithful replay.
     model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
     model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
+    distance_fn = _build_distance(args.z_dim, args, device)   # fresh distance module
+    dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
     optimizer = torch.optim.Adam(
-        list(model_enc.parameters()) + list(model_attr.parameters()),
+        list(model_enc.parameters()) + list(model_attr.parameters()) + dist_params,
         lr=args.lr,
         weight_decay=1e-5,
     )
 
     for epoch in range(best_epoch):
         train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train_val, optimizer, combined_loader, device
+            model_enc, model_attr, attrs_train_val, optimizer, combined_loader, device,
+            distance_fn=distance_fn,   # same metric as Phase 1
         )
         print(
             f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f} acc={train_acc:.4f}"
         )
 
-    test_acc = evaluate(model_enc, model_attr, attrs_test, test_loader, device)
+    test_acc = evaluate(
+        model_enc, model_attr, attrs_test, test_loader, device,
+        distance_fn=distance_fn,   # use learned metric at inference time
+    )
+
+    # Save checkpoint; include distance module state for EXTENSION experiments.
     ckpt = {
         "best_epoch": best_epoch,
+        "distance": args.distance,
         "encoder": model_enc.state_dict(),
         "attr_embed": model_attr.state_dict(),
         "test_acc": test_acc,
     }
-    path = os.path.join(args.save_dir, f"{args.exp_name}_best.pt")
+    if isinstance(distance_fn, nn.Module):
+        # EXTENSION: persist learned metric parameters alongside the model.
+        ckpt["distance_fn"] = distance_fn.state_dict()
+
+    path = os.path.join(args.save_dir, f"{args.exp_name}_{args.distance}_best.pt")
     torch.save(ckpt, path)
     print(f"Final zero-shot test accuracy (50-way): {test_acc:.4f}")
-    print(f"  -> saved best to {path}")
+    print(f"  -> saved checkpoint to {path}")
 
 
 if __name__ == "__main__":
