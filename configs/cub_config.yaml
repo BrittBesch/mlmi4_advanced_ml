@@ -1,7 +1,7 @@
 # CUB-200-2011 zero-shot experiment (Table 3 replication)
 
 data:
-  root: "data/CUB_200_2011"
+  data_dir: "data/CUB_200_2011"
   image_size: 224
   batch_size: 32
   num_workers: 0

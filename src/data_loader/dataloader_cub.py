@@ -143,75 +143,60 @@ class CUBDataset(Dataset):
         return img, label
 
 
-def get_cub_dataloaders(
-    root: str,
-    batch_size: int = 32,
-    num_workers: int = 0,
-    image_size: int = 224,
-):
+def get_dataloader(config, split):
     """
-    Build train/val/test DataLoaders for CUB zero-shot following the paper:
-    100 train classes, 50 val classes, 50 test classes.
-    Also returns class attributes array (200, 312).
+    Build a DataLoader for a single CUB split (zero-shot, standard batching).
+
+    Uses TenCrop for training (paper setup) and CenterCrop for val/test.
+    Class attributes are loaded separately via load_class_attributes().
+
+    Args:
+        config: dict with keys data_dir, image_size, batch_size, num_workers
+        split: "train", "val", or "test"
+
+    Returns:
+        DataLoader for the requested split
     """
     from torchvision import transforms
 
-    # Normalization used with ImageNet-pretrained GoogLeNet
+    root = config.get("data_dir", "data/CUB_200_2011")
+    image_size = config.get("image_size", 224)
+    batch_size = config.get("batch_size", 32)
+    num_workers = config.get("num_workers", 0)
+
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225],
     )
 
-    # Training: follow the paper by using multiple crops from the original and
-    # horizontally-flipped image. torchvision.transforms.TenCrop implements
-    # (top-left, top-right, bottom-left, bottom-right, center) + their mirrors.
-    transform_train = transforms.Compose(
-        [
-            transforms.Resize(256),
-            transforms.TenCrop(image_size),
-            transforms.Lambda(
-                lambda crops: torch.stack(
-                    [normalize(transforms.ToTensor()(c)) for c in crops]
-                )
-            ),
-        ]
-    )
+    if split == "train":
+        transform = transforms.Compose(
+            [
+                transforms.Resize(256),
+                transforms.TenCrop(image_size),
+                transforms.Lambda(
+                    lambda crops: torch.stack(
+                        [normalize(transforms.ToTensor()(c)) for c in crops]
+                    )
+                ),
+            ]
+        )
+    else:
+        transform = transforms.Compose(
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                normalize,
+            ]
+        )
 
-    # Validation / test: use only the center crop of the original image.
-    transform_eval = transforms.Compose(
-        [
-            transforms.Resize(256),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            normalize,
-        ]
+    dataset = CUBDataset(root, split=split, transform=transform)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=(split == "train"),
+        num_workers=num_workers,
+        pin_memory=True,
     )
-
-    train_ds = CUBDataset(root, split="train", transform=transform_train)
-    val_ds = CUBDataset(root, split="val", transform=transform_eval)
-    test_ds = CUBDataset(root, split="test", transform=transform_eval)
-
-    train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-    )
-    test_loader = torch.utils.data.DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-    )
-
-    # Class attributes: (200, 312). Rows 0..99 = train, 100..149 = val, 150..199 = test (0-indexed)
-    attributes = load_class_attributes(root)
-    assert attributes.shape[0] == 200 and attributes.shape[1] == N_ATTRIBUTES
-
-    return {
-        "train_loader": train_loader,
-        "val_loader": val_loader,
-        "test_loader": test_loader,
-        "attributes": attributes,
-        "train_dataset": train_ds,
-        "val_dataset": val_ds,
-        "train_dataset": train_ds,
-        "test_dataset": test_ds,
-    }
+    return loader

@@ -27,7 +27,7 @@ from loss import (
     DiagonalMahalanobisDistance,   # EXTENSION – Experiment 2
     LowRankMahalanobisDistance,    # EXTENSION – Experiment 3
 )
-from src.data_loader.dataloader_cub import get_cub_dataloaders
+from src.data_loader.dataloader_cub import get_dataloader, load_class_attributes
 from src.utils.device import get_device
 from src.utils.seed import set_seed
 
@@ -225,7 +225,7 @@ def main():
         data_cfg = cfg.get("data", {})
         train_cfg = cfg.get("training", {})
         exp_cfg = cfg.get("experiment", {})
-        args.data_root = data_cfg.get("root", args.data_root)
+        args.data_root = data_cfg.get("data_dir", args.data_root)
         args.image_size = data_cfg.get("image_size", args.image_size)
         args.batch_size = data_cfg.get("batch_size", args.batch_size)
         args.epochs = train_cfg.get("epochs", args.epochs)
@@ -239,15 +239,16 @@ def main():
     set_seed(args.seed)
     device = get_device()
 
-    data = get_cub_dataloaders(
-        args.data_root,
-        batch_size=args.batch_size,
-        image_size=args.image_size,
-    )
-    train_loader = data["train_loader"]
-    val_loader = data["val_loader"]
-    test_loader = data["test_loader"]
-    attributes = data["attributes"]
+    data_cfg = {
+        "data_dir": args.data_root,
+        "image_size": args.image_size,
+        "batch_size": args.batch_size,
+        "num_workers": 0,
+    }
+    train_loader = get_dataloader(data_cfg, "train")
+    val_loader = get_dataloader(data_cfg, "val")
+    test_loader = get_dataloader(data_cfg, "test")
+    attributes = load_class_attributes(args.data_root)
 
     # 100 train, 50 val, 50 test classes (rows 0..99, 100..149, 150..199)
     attrs_train = attributes[:100]
@@ -331,7 +332,7 @@ def main():
     # Phase 2: retrain on train+val for best_epoch epochs, then evaluate on test
     from torch.utils.data import ConcatDataset, DataLoader
 
-    combined_ds = ConcatDataset([data["train_dataset"], data["val_dataset"]])
+    combined_ds = ConcatDataset([train_loader.dataset, val_loader.dataset])
     combined_loader = DataLoader(
         combined_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True
     )
