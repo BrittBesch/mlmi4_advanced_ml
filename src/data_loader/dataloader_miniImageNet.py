@@ -7,10 +7,9 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import torchvision.transforms.functional as F
 
-root_fold = str(Path(__file__).resolve().parents[2]) # .parents[2] automatically goes up 3 levels (since 0 is the immediate parent)
-sys.path.append(root_fold)
+# Note: Ensure project root is in PYTHONPATH (e.g., run with PYTHONPATH=.)
+# E.g.: PYTHONPATH=. python src/training/train_fewshot.py
 from protonet_sampler import PrototypicalBatchSampler
 
 class MiniImageNet(Dataset):
@@ -86,7 +85,7 @@ class MiniImageNet(Dataset):
       image = self.transform(image)
     
     # 3.4 Return images and labels
-    return image, self.labels[index]
+    return image, label
 
 # ==================================================================
 # STEP 4: INSTANTIATE DATALOADER & PERFORM CUTOUT

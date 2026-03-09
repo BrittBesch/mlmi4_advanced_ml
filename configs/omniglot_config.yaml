@@ -1,0 +1,10 @@
+data:
+  data_dir: "./data/omniglot"
+  n_way: 60
+  n_shot: 5
+  n_query: 5
+  num_workers: 4
+  train_params:
+    n_episodes: 100
+  test_params:
+    n_episodes: 1000

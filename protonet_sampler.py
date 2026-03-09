@@ -12,7 +12,7 @@ Key Modifications vs. Snell vs. Orobix
 (1) Orobix vs. Snell: 
   - Snell's method puts the Sampler inside the Dataset class. Thus, the Dataset has to scan through labels every single step: O(N)
   - Orobix's method decouples the Sampler from the Dataset: The Dataset loads images. The Sampler uses a pre-calculated matrix of indices to tell Dataset
-  which index unmbers to load: O(1).
+  which index numbers to load: O(1).
 
 (2) Our Approach vs. Orobix: 
   - Keep Orobix's matrix efficiency but change input arguments to be more intuitive
@@ -34,7 +34,7 @@ class PrototypicalBatchSampler(Sampler):
     n_way           : number of classes to sample per batch
     n_shot          : number of images to sample per class
     n_query         : number of images to use for query set
-    num_episodes    : number of episodes to train on
+    n_episodes    : number of episodes to train on
 
   Yields:
     batch           : 1D tensor of length n_way * (n_shot + n_query)
