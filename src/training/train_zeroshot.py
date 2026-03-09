@@ -24,8 +24,7 @@ if PROJECT_ROOT not in sys.path:
 from loss import (
     prototypical_loss_from_prototypes,
     euclidean_dist,
-    DiagonalMahalanobisDistance,   # EXTENSION – Experiment 2
-    LowRankMahalanobisDistance,    # EXTENSION – Experiment 3
+    build_distance,
 )
 from src.data_loader.dataloader_cub import get_dataloader, load_class_attributes
 from src.utils.device import get_device
@@ -259,21 +258,11 @@ def main():
     model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
 
     # ---- EXTENSION: distance metric ------------------------------------------
-    # Build the distance callable.  For Mahalanobis variants the callable is an
-    # nn.Module with learnable parameters that are added to the optimizer below.
     # Experiment 1 (baseline) : --distance euclidean  → no extra module/params
     # Experiment 2 (EXTENSION): --distance diagonal   → DiagonalMahalanobisDistance
     # Experiment 3 (EXTENSION): --distance lowrank    → LowRankMahalanobisDistance
-    def _build_distance(z_dim, args, device):
-        if args.distance == "euclidean":
-            return euclidean_dist          # plain function, no parameters
-        if args.distance == "diagonal":
-            return DiagonalMahalanobisDistance(dim=z_dim).to(device)
-        if args.distance == "lowrank":
-            return LowRankMahalanobisDistance(dim=z_dim, rank=args.lowrank_r).to(device)
-        raise ValueError(f"Unknown distance: {args.distance}")
-
-    distance_fn = _build_distance(args.z_dim, args, device)
+    dist_cfg = {"distance": args.distance, "lowrank_r": args.lowrank_r}
+    distance_fn = build_distance(dist_cfg, args.z_dim, device)
 
     # Collect learnable parameters from the distance module (empty list for Euclidean).
     dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
@@ -343,7 +332,7 @@ def main():
     # that training for best_epoch steps is a faithful replay.
     model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
     model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
-    distance_fn = _build_distance(args.z_dim, args, device)   # fresh distance module
+    distance_fn = build_distance(dist_cfg, args.z_dim, device)   # fresh distance module
     dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
     optimizer = torch.optim.Adam(
         list(model_enc.parameters()) + list(model_attr.parameters()) + dist_params,

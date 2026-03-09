@@ -159,6 +159,31 @@ class PrototypicalLoss(nn.Module):
 #   Experiment 3 (EXTENSION) : --distance lowrank    → low-rank M        (d×r extra params)
 
 
+def build_distance(config: dict, z_dim: int, device: torch.device):
+    """
+    Factory that returns the distance callable specified by config.
+
+    Args:
+        config: dict with key "distance" ("euclidean", "diagonal", or "lowrank")
+                and optional "lowrank_r" (default 64) for the low-rank variant.
+        z_dim:  embedding dimensionality (needed by learnable metrics).
+        device: torch device to place learnable parameters on.
+
+    Returns:
+        A callable (x, y) -> (N, M) distance matrix.  For learnable variants
+        this is an nn.Module whose parameters should be added to the optimizer.
+    """
+    metric = config.get("distance", "euclidean")
+    if metric == "euclidean":
+        return euclidean_dist
+    if metric == "diagonal":
+        return DiagonalMahalanobisDistance(dim=z_dim).to(device)
+    if metric == "lowrank":
+        rank = config.get("lowrank_r", 64)
+        return LowRankMahalanobisDistance(dim=z_dim, rank=rank).to(device)
+    raise ValueError(f"Unknown distance metric: {metric}")
+
+
 class DiagonalMahalanobisDistance(nn.Module):
     """
     EXTENSION – Experiment 2: Diagonal Mahalanobis distance.
