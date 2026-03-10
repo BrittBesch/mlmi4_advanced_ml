@@ -1,10 +1,28 @@
 data:
+  dataset: "omniglot"       
   data_dir: "./data/omniglot"
   n_way: 60
   n_shot: 5
   n_query: 5
   num_workers: 4
   train_params:
+    n_episodes: 100         # Note: Paper uses up to 20,000 for full training
+  val_params:               # Required for the dataloader factory
     n_episodes: 100
   test_params:
     n_episodes: 1000
+
+model_params:
+  hidden_dim: 64
+  dropblock_size: 0         # Change to 5 for extension
+  dropblock_prob: 0.1
+
+distance: "euclidean"       # Toggle between: euclidean, diagonal, lowrank
+
+# ---- Training & Logging Hyperparameters ----
+lr: 0.001
+lr_step: 2000
+log_interval: 10            # Lowered since we are running 100 episodes
+val_interval: 100           # Lowered to validate at the end of the 100 episodes
+output_dir: "./results/omniglot_baseline"
+seed: 42
