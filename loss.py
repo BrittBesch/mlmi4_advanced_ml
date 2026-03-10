@@ -6,6 +6,8 @@ using Euclidean distance to class prototypes. Extensible for Mahalanobis
 distance (extension: distance metric limitation).
 """
 
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,7 +38,7 @@ def prototypical_loss(
     labels: torch.Tensor,
     n_support: int,
     distance_fn=euclidean_dist,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Few-shot prototypical loss: prototypes = mean of support embeddings per class;
     loss = NLL over distances from query embeddings to prototypes.
@@ -93,7 +95,7 @@ def prototypical_loss_from_prototypes(
     prototypes: torch.Tensor,
     labels: torch.Tensor,
     distance_fn=euclidean_dist,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Loss when prototypes are given (e.g. zero-shot: prototypes from attributes).
     Used for CUB zero-shot: prototypes = (n_classes, D), labels = class indices in [0, n_classes-1].
