@@ -47,9 +47,12 @@ class CUBImageEncoder(nn.Module):
 
     def __init__(self, z_dim: int = 1024):
         super().__init__()
-        # Pretrained GoogLeNet on ImageNet. We remove the final classifier so that
-        # the network outputs 1,024-dim pooled features.
-        self.backbone = models.googlenet(weights=models.GoogLeNet_Weights.IMAGENET1K_V1, aux_logits=False)
+        # Pretrained GoogLeNet on ImageNet. We keep the default aux_logits=True
+        # required by the pretrained weights, and later ignore aux outputs.
+        # The final classifier is removed so the network outputs 1,024-dim features.
+        self.backbone = models.googlenet(
+            weights=models.GoogLeNet_Weights.IMAGENET1K_V1
+        )
         self.backbone.fc = nn.Identity()
         for p in self.backbone.parameters():
             p.requires_grad = False
