@@ -121,7 +121,9 @@ def train(config):      #### will introduce configs with YAML to match britt and
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
-    n_shot = data_config['n_shot']
+    train_n_shot = data_config['train_params']['n_shot']
+    val_n_shot = data_config.get('val_params', data_config['test_params'])['n_shot']
+    test_n_shot = data_config['test_params']['n_shot']
     n_episodes = data_config['train_params']['n_episodes']
 
     # ---- 2. Model Setup ----
@@ -163,7 +165,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         # Reshape batch into support/query split
         # Sampler gives us (n_way, n_shot + n_query) samples grouped by class
         loss, acc = train_episode(
-                    model, x, y, n_shot, optimizer, distance_fn
+                    model, x, y, train_n_shot, optimizer, distance_fn
                 )
         scheduler.step()
 
@@ -185,7 +187,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         # ---- Validation ----
         if episode % val_interval == 0:
             val_acc, val_loss, val_ci = evaluate(
-                            model, val_loader, n_shot, device, distance_fn
+                            model, val_loader, val_n_shot, device, distance_fn
                         )
             print(
                 f"  --> Validation | "
@@ -224,7 +226,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         test_loader = get_omniglot_loader(data_config, split='test')
 
     test_acc, test_loss, test_ci = evaluate(
-        model, test_loader, n_shot, device, distance_fn
+        model, test_loader, test_n_shot, device, distance_fn
         )
     print(f"Test Accuracy: {test_acc*100:.2f}% ± {test_ci*100:.2f}% ")
 
