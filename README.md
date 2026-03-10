@@ -73,4 +73,18 @@ The typical workflow could be:
 2. **Run a training script**, e.g. a few‑shot experiment via `src/training/train_fewshot.py`.
 3. **Inspect outputs** under `experiments/checkpoints`, `experiments/logs`, and `experiments/results`.
 
+### CUB zero-shot (Table 3 replication – Britt)
+
+1. Download [CUB-200-2011](https://data.caltech.edu/records/65de6-vp158) and extract to `data/CUB_200_2011` (so that `data/CUB_200_2011/images.txt` and `data/CUB_200_2011/images/` exist).
+2. Download class attributes (312-dim per class) and place under `data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt` (e.g. from [IBM cdfsl-benchmark](https://github.com/IBM/cdfsl-benchmark/blob/master/filelists/CUB/CUB_200_2011/attributes/)).
+3. From the **project root** `mlmi4_advanced_ml` run:
+
+   ```bash
+   python src/training/train_zeroshot.py --data_root data/CUB_200_2011
+   ```
+
+   Or with config: `python src/training/train_zeroshot.py --config configs/cub_config.yaml`
+
+   Best model is saved to `experiments/checkpoints/cub_zeroshot_best.pt`; final test accuracy is the zero-shot result to report (Table 3).
+
 
