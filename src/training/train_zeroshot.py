@@ -330,6 +330,7 @@ def main():
     # Reinitialise models, distance module, and optimizer from scratch.
     # Phase 2 must start from the same initial conditions as Phase 1 so
     # that training for best_epoch steps is a faithful replay.
+    set_seed(args.seed)
     model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
     model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
     distance_fn = build_distance(dist_cfg, args.z_dim, device)   # fresh distance module
