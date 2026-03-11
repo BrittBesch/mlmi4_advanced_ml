@@ -73,4 +73,11 @@ The typical workflow could be:
 2. **Run a training script**, e.g. a few‑shot experiment via `src/training/train_fewshot.py`.
 3. **Inspect outputs** under `experiments/checkpoints`, `experiments/logs`, and `experiments/results`.
 
+### Omniglot Few-shot Experiment (Thao)
 
+1. From the **project root** `mlmi4_advanced_ml` run:
+
+   ```bash
+   PYTHONPATH=. python src/training/train_fewshot.py configs/omniglot_config.yaml
+2. The Omniglot dataset will be automatically downloaded to `data/omniglot` via `torchvision` upon the first run.
+3. Best model is saved to `results/omniglot_baseline/best_model.pt`; final test accuracy is the few-shot result to report.
