@@ -47,6 +47,9 @@ echo "Start time: $(date)"
 
 cd /home/bb720/rds/hpc-work/mlmi4_advanced_ml
 
+# Activate local virtual environment
+source .venv/bin/activate
+
 # Ensure experiment directories exist (as suggested in README)
 mkdir -p experiments/checkpoints
 mkdir -p experiments/logs
