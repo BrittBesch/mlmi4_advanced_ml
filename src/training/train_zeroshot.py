@@ -331,7 +331,9 @@ def main():
         "batch_size": args.batch_size,
         "num_workers": 0,
     }
-    train_loader = get_dataloader(data_cfg, "train")
+    # For CUB zero-shot, use episodic 50-way / 10-query training batches to
+    # more closely follow the setup described in Snell et al. (2017).
+    train_loader = get_dataloader(data_cfg, "train", episodic=True, n_way=50, n_query=10)
     val_loader = get_dataloader(data_cfg, "val")
     test_loader = get_dataloader(data_cfg, "test")
     attributes = load_class_attributes(args.data_root)

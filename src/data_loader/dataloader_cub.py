@@ -2,8 +2,8 @@
 CUB-200-2011 dataloader for zero-shot learning (Table 3 replication).
 
 Loads images and class-level attributes. Supports the 100/50/50 class split
-(train/val/test) as in Snell et al. (2017), following Reed et al. (2016):
-100 training classes, 50 validation classes, 50 test classes.
+(train/val/test) as in Snell et al. (2017): 100 training classes,
+50 validation classes, 50 test classes.
 Dataset: https://data.caltech.edu/records/65de6-vp158
 """
 
@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 # CUB has 200 classes. For zero-shot per Snell et al.:
 # 100 train, 50 val, 50 test classes.
@@ -131,6 +132,9 @@ class CUBDataset(Dataset):
         # Map class id (1..200) to index in this split's classes (0..len-1)
         self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
 
+        # Keep labels aligned with samples for use by custom Samplers
+        self.labels = [self.class_to_idx[c] for _, c in self.samples]
+
     def __len__(self):
         return len(self.samples)
 
@@ -143,7 +147,7 @@ class CUBDataset(Dataset):
         return img, label
 
 
-def get_dataloader(config, split):
+def get_dataloader(config, split, episodic: bool = False, n_way: int = 50, n_query: int = 10):
     """
     Build a DataLoader for a single CUB split (zero-shot, standard batching).
 
@@ -158,6 +162,8 @@ def get_dataloader(config, split):
         DataLoader for the requested split
     """
     from torchvision import transforms
+    import math
+    from mlmi4_advanced_ml.protonet_sampler import PrototypicalBatchSampler
 
     root = config.get("data_dir", "data/CUB_200_2011")
     image_size = config.get("image_size", 224)
@@ -192,11 +198,35 @@ def get_dataloader(config, split):
         )
 
     dataset = CUBDataset(root, split=split, transform=transform)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=(split == "train"),
-        num_workers=num_workers,
-        pin_memory=True,
-    )
+
+    # For zero-shot CUB we want to match the episodic 50-way/10-query
+    # training regime described in Snell et al. (2017). We implement this
+    # via a PrototypicalBatchSampler on the training split only.
+    if split == "train" and episodic:
+        n_shot = 0  # zero-shot: no labeled support examples, only queries
+        n_samples_per_episode = n_way * (n_shot + n_query)
+        n_episodes = max(
+            1, math.ceil(len(dataset) / max(1, n_samples_per_episode))
+        )
+        sampler = PrototypicalBatchSampler(
+            labels=dataset.labels,
+            n_way=n_way,
+            n_shot=n_shot,
+            n_query=n_query,
+            n_episodes=n_episodes,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+    else:
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=(split == "train"),
+            num_workers=num_workers,
+            pin_memory=True,
+        )
     return loader
