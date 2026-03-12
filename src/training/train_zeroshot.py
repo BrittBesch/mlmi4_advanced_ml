@@ -9,12 +9,14 @@ classes = attribute_embed(unseen_attributes); classify by nearest prototype.
 import argparse
 import os
 import sys
+import random
+from collections import defaultdict
 
 import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from torchvision import models
+from torchvision import models, transforms
 
 # Add project root so we can import from mlmi4_advanced_ml
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -152,6 +154,88 @@ def train_epoch(model_enc, model_attr, attributes_split, optimizer, loader, devi
     return total_loss / max(n_batches, 1), total_acc / max(n_batches, 1)
 
 
+def train_epoch_episodic(
+    model_enc,
+    model_attr,
+    attributes_split,
+    optimizer,
+    dataset,
+    device,
+    distance_fn=None,
+    n_episodes: int = 50,
+    n_way: int = 50,
+    n_query: int = 10,
+    do_backward: bool = True,
+):
+    """
+    Phase 1 training using episodic 50-way, 10-query episodes as in Snell et al.
+    """
+    if distance_fn is None:
+        distance_fn = euclidean_dist
+
+    model_enc.train()
+    model_attr.train()
+    if isinstance(distance_fn, nn.Module):
+        distance_fn.train()
+
+    # Fixed class attributes for this split.
+    att_full = torch.tensor(attributes_split, dtype=torch.float32, device=device)
+
+    # Build index lists per class label once per epoch.
+    indices_per_class: dict[int, list[int]] = defaultdict(list)
+    for idx in range(len(dataset)):
+        _, lbl = dataset[idx]
+        indices_per_class[int(lbl)] += [idx]
+
+    all_classes = [c for c in indices_per_class.keys() if len(indices_per_class[c]) > 0]
+
+    total_loss = 0.0
+    total_acc = 0.0
+
+    for _ in tqdm(range(n_episodes), desc="Train (episodic)", leave=False):
+        if len(all_classes) < n_way:
+            episode_classes = all_classes
+            this_way = len(all_classes)
+        else:
+            episode_classes = random.sample(all_classes, n_way)
+            this_way = n_way
+
+        episode_indices = []
+        episode_labels = []
+        for local_idx, c in enumerate(episode_classes):
+            idxs = indices_per_class[c]
+            if len(idxs) >= n_query:
+                chosen = random.sample(idxs, n_query)
+            else:
+                chosen = [random.choice(idxs) for _ in range(n_query)]
+            episode_indices.extend(chosen)
+            episode_labels.extend([local_idx] * n_query)
+
+        images = []
+        for idx in episode_indices:
+            img, _ = dataset[idx]
+            images.append(img)
+        images = torch.stack(images, dim=0).to(device)
+        labels = torch.tensor(episode_labels, dtype=torch.long, device=device)
+
+        cls_idx_tensor = torch.tensor(episode_classes, dtype=torch.long, device=device)
+        prototypes = _l2_normalize(model_attr(att_full[cls_idx_tensor[:this_way]]))
+
+        z = model_enc(images)
+        loss, acc = prototypical_loss_from_prototypes(
+            z, prototypes, labels, distance_fn=distance_fn
+        )
+        if do_backward:
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        total_loss += loss.item()
+        total_acc += acc.item()
+
+    return total_loss / max(n_episodes, 1), total_acc / max(n_episodes, 1)
+
+
 @torch.no_grad()
 def evaluate(model_enc, model_attr, attributes_unseen, loader, device,
              distance_fn=None):
@@ -284,33 +368,43 @@ def main():
     best_val_loss = float("inf")
     best_epoch = 0
 
-    # Phase 1: train on train classes, early-stop on val loss (as in paper)
+    # Phase 1: train on train classes with episodic 50-way, 10-query episodes,
+    # then early-stop on val loss (as in paper).
     for epoch in range(args.epochs):
-        train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train, optimizer, train_loader, device,
-            distance_fn=distance_fn,   # pass chosen metric (Exp 1/2/3)
+        train_loss, train_acc = train_epoch_episodic(
+            model_enc,
+            model_attr,
+            attrs_train,
+            optimizer,
+            train_loader.dataset,
+            device,
+            distance_fn=distance_fn,
+            n_episodes=50,
+            n_way=50,
+            n_query=10,
+            do_backward=True,
         )
 
-        # Validation loss on val classes (same metric as training)
+        # Validation: approximate paper by computing loss on episodic val episodes.
         model_enc.eval()
         model_attr.eval()
         if isinstance(distance_fn, nn.Module):
             distance_fn.eval()
         with torch.no_grad():
-            att_val = torch.tensor(attrs_val, dtype=torch.float32, device=device)
-            prototypes_val = _l2_normalize(model_attr(att_val))
-            val_loss = 0.0
-            n_batches = 0
-            for images, labels in val_loader:
-                images = images.to(device)
-                labels = labels.to(device)
-                z = model_enc(images)
-                loss, _ = prototypical_loss_from_prototypes(
-                    z, prototypes_val, labels, distance_fn=distance_fn
-                )
-                val_loss += loss.item()
-                n_batches += 1
-            val_loss /= max(n_batches, 1)
+            # Reuse episodic routine but on val split (no optimiser step).
+            val_loss, _ = train_epoch_episodic(
+                model_enc,
+                model_attr,
+                attrs_val,
+                optimizer,            # not used for updates (no backward in eval)
+                val_loader.dataset,
+                device,
+                distance_fn=distance_fn,
+                n_episodes=20,
+                n_way=50,
+                n_query=10,
+                do_backward=False,
+            )
 
         print(
             f"Epoch {epoch+1}/{args.epochs}  train_loss={train_loss:.4f}  "
@@ -323,10 +417,36 @@ def main():
 
     # Phase 2: retrain on train+val for best_epoch epochs, then evaluate on test
     from torch.utils.data import ConcatDataset, DataLoader
+    from src.data_loader.dataloader_cub import CUBDataset
 
-    combined_ds = ConcatDataset([train_loader.dataset, val_loader.dataset])
+    # For Phase 2 we want the same multi-crop behaviour as in Phase 1 training,
+    # so we mirror the TenCrop-based transform used in get_dataloader(..., "train").
+    phase2_transform = transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.TenCrop(args.image_size),
+            transforms.Lambda(
+                lambda crops: torch.stack(
+                    [
+                        transforms.Normalize(
+                            mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225],
+                        )(transforms.ToTensor()(c))
+                        for c in crops
+                    ]
+                )
+            ),
+        ]
+    )
+    train_ds_phase2 = CUBDataset(args.data_root, split="train", transform=phase2_transform)
+    val_ds_phase2 = CUBDataset(args.data_root, split="val", transform=phase2_transform)
+    combined_ds = ConcatDataset([train_ds_phase2, val_ds_phase2])
     combined_loader = DataLoader(
-        combined_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True
+        combined_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
     )
     attrs_train_val = attributes[:150]  # 100 train + 50 val
 
