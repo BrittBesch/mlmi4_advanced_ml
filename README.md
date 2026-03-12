@@ -87,4 +87,10 @@ The typical workflow could be:
 
    Best model is saved to `experiments/checkpoints/cub_zeroshot_best.pt`; final test accuracy is the zero-shot result to report (Table 3).
 
+### Omniglot Few-shot Experiment (Thao)
+1. From the **project root** `mlmi4_advanced_ml` run:
 
+   ```bash
+   PYTHONPATH=. python src/training/train_fewshot.py configs/omniglot_config.yaml
+2. The Omniglot dataset will be automatically downloaded to `data/omniglot` via `torchvision` upon the first run.
+3. Best model is saved to `results/omniglot_baseline/best_model.pt`; final test accuracy is the few-shot result to report.

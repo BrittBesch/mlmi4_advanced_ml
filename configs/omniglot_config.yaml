@@ -1,0 +1,36 @@
+data:
+  data_dir: "./data/omniglot"
+  num_workers: 4
+  
+  train_params:
+    n_episodes: 100    
+    n_way: 60          # Train Way
+    n_shot: 5          # Train Shot
+    n_query: 5
+    
+  val_params:
+    n_episodes: 100
+    n_way: 5           # Val Way (Match test for accurate early stopping)
+    n_shot: 1          # Val Shot
+    n_query: 15
+    
+  test_params:
+    n_episodes: 1000
+    n_way: 5           # Test Way (Benchmark)
+    n_shot: 1          # Test Shot (Benchmark)
+    n_query: 15        # Paper uses 15 queries for testing
+
+model_params:
+  hidden_dim: 64
+  dropblock_size: 0         # Change to 5 for extension
+  dropblock_prob: 0.1
+
+distance: "euclidean"       # Toggle between: euclidean, diagonal, lowrank
+
+# ---- Training & Logging Hyperparameters ----
+lr: 0.001
+lr_step: 2000
+log_interval: 10            # Lowered since we are running 100 episodes
+val_interval: 100           # Lowered to validate at the end of the 100 episodes
+output_dir: "./results/omniglot_baseline"
+seed: 42
