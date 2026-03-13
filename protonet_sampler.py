@@ -45,10 +45,10 @@ class PrototypicalBatchSampler(Sampler):
   # ==================================================================
   def __init__(self, labels, n_way, n_shot, n_query, n_episodes):
     '''
-    Build a dictionary to look up image indices with key=class_id 
-    and value=list of image indices
+    Build a dictionary to look up image indices with key=class_id
+    and value=list of image indices.
     '''
-    super().__init__(None)
+    super().__init__()
     self.labels = labels
     self.n_way = n_way
     self.n_shot = n_shot

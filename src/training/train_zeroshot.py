@@ -288,6 +288,21 @@ def main():
     parser.add_argument("--save_dir", type=str, default="experiments/checkpoints")
     parser.add_argument("--exp_name", type=str, default="cub_zeroshot")
 
+    # Early stopping (Phase 1, based on validation loss)
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=0,
+        help="Stop Phase 1 training if val loss doesn't improve for this many "
+             "epochs. Set to 0 to disable early stopping.",
+    )
+    parser.add_argument(
+        "--early_stopping_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum val loss improvement to reset early stopping patience.",
+    )
+
     # EXTENSION: distance metric selection
     # Experiment 1: --distance euclidean  (paper baseline, no extra parameters)
     # Experiment 2: --distance diagonal   (diagonal Mahalanobis, d extra params)
@@ -316,6 +331,13 @@ def main():
         args.batch_size = data_cfg.get("batch_size", args.batch_size)
         args.epochs = train_cfg.get("epochs", args.epochs)
         args.lr = train_cfg.get("lr", args.lr)
+        es_cfg = train_cfg.get("early_stopping", {}) or {}
+        args.early_stopping_patience = es_cfg.get(
+            "patience", train_cfg.get("early_stopping_patience", args.early_stopping_patience)
+        )
+        args.early_stopping_min_delta = es_cfg.get(
+            "min_delta", train_cfg.get("early_stopping_min_delta", args.early_stopping_min_delta)
+        )
         args.seed = exp_cfg.get("seed", args.seed)
         args.save_dir = exp_cfg.get("save_dir", args.save_dir)
         args.exp_name = exp_cfg.get("exp_name", args.exp_name)
@@ -369,6 +391,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     best_val_loss = float("inf")
     best_epoch = 0
+    epochs_since_improvement = 0
 
     # Phase 1: train on train classes with episodic 50-way, 10-query episodes,
     # then early-stop on val loss (as in paper).
@@ -413,9 +436,25 @@ def main():
             f"train_acc={train_acc:.4f}  val_loss={val_loss:.4f}"
         )
 
-        if val_loss < best_val_loss:
+        improved = val_loss < (best_val_loss - float(args.early_stopping_min_delta))
+        if improved:
             best_val_loss = val_loss
             best_epoch = epoch + 1
+            epochs_since_improvement = 0
+        else:
+            epochs_since_improvement += 1
+
+        if args.early_stopping_patience and epochs_since_improvement >= args.early_stopping_patience:
+            print(
+                f"Early stopping at epoch {epoch+1}: val_loss did not improve by "
+                f"> {args.early_stopping_min_delta:g} for {args.early_stopping_patience} epochs. "
+                f"Best epoch was {best_epoch} (best_val_loss={best_val_loss:.4f})."
+            )
+            break
+
+    # Fallback safety: if something odd happened, ensure we retrain at least 1 epoch.
+    if best_epoch <= 0:
+        best_epoch = 1
 
     # Phase 2: retrain on train+val for best_epoch epochs, then evaluate on test
     from torch.utils.data import ConcatDataset, DataLoader

@@ -13,7 +13,7 @@
 #SBATCH --job-name=cub-zeroshot
 #SBATCH --output=experiments/logs/%x-%j.out
 #SBATCH --error=experiments/logs/%x-%j.err
-#SBATCH --time=8:00:00
+#SBATCH --time=3:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -49,6 +49,9 @@ cd /home/bb720/rds/hpc-work/mlmi4_advanced_ml
 
 # Activate local virtual environment
 source .venv/bin/activate
+
+# Make repository importable as the mlmi4_advanced_ml package
+export PYTHONPATH="/home/bb720/rds/hpc-work:${PYTHONPATH:-}"
 
 # Ensure experiment directories exist (as suggested in README)
 mkdir -p experiments/checkpoints
