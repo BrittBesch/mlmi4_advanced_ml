@@ -128,7 +128,7 @@ class PrototypicalLoss(nn.Module):
 
     def forward(
         self, embeddings: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         return prototypical_loss(
             embeddings, labels, self.n_support, distance_fn=self.distance_fn
         )

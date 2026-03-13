@@ -32,7 +32,7 @@ from src.data_loader.dataloader_miniImageNet import get_dataloader as get_miniim
 from src.data_loader.dataloader_omniglot import get_dataloader as get_omniglot_loader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+print(f"Using device: {device}")  # NEW
 
 def train_episode(model, x, y, n_support, optimizer, distance_fn):
     """
@@ -191,7 +191,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         # ---- Validation ----
         if episode % val_interval == 0:
             val_acc, val_loss, val_ci = evaluate(
-                            model, val_loader, val_n_shot, device, distance_fn
+                            model, val_loader, val_n_shot, distance_fn, device
                         )
             print(
                 f"  --> Validation | "
@@ -230,7 +230,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         test_loader = get_omniglot_loader(data_config, split='test')
 
     test_acc, test_loss, test_ci = evaluate(
-        model, test_loader, test_n_shot, device, distance_fn
+        model, test_loader, test_n_shot, distance_fn, device
         )
     print(f"Test Accuracy: {test_acc*100:.2f}% ± {test_ci*100:.2f}% ")
 
