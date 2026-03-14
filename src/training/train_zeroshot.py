@@ -292,7 +292,7 @@ def main():
     parser.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=0,
+        default=5,
         help="Stop Phase 1 training if val loss doesn't improve for this many "
              "epochs. Set to 0 to disable early stopping.",
     )
@@ -457,11 +457,9 @@ def main():
         best_epoch = 1
 
     # Phase 2: retrain on train+val for best_epoch epochs, then evaluate on test
-    from torch.utils.data import ConcatDataset, DataLoader
     from src.data_loader.dataloader_cub import CUBDataset
 
-    # For Phase 2 we want the same multi-crop behaviour as in Phase 1 training,
-    # so we mirror the TenCrop-based transform used in get_dataloader(..., "train").
+    # Use same TenCrop transform as Phase 1 training.
     phase2_transform = transforms.Compose(
         [
             transforms.Resize(256),
@@ -479,16 +477,9 @@ def main():
             ),
         ]
     )
-    train_ds_phase2 = CUBDataset(args.data_root, split="train", transform=phase2_transform)
-    val_ds_phase2 = CUBDataset(args.data_root, split="val", transform=phase2_transform)
-    combined_ds = ConcatDataset([train_ds_phase2, val_ds_phase2])
-    combined_loader = DataLoader(
-        combined_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True,
-    )
+    # Single dataset covering all 150 train+val classes with labels 0..149,
+    # so train_epoch_episodic samples 50-way episodes matching Phase 1 exactly.
+    combined_ds = CUBDataset(args.data_root, split="trainval", transform=phase2_transform)
     attrs_train_val = attributes[:150]  # 100 train + 50 val
 
     # Reinitialise models, distance module, and optimizer from scratch.
@@ -506,9 +497,18 @@ def main():
     )
 
     for epoch in range(best_epoch):
-        train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train_val, optimizer, combined_loader, device,
-            distance_fn=distance_fn,   # same metric as Phase 1
+        train_loss, train_acc = train_epoch_episodic(
+            model_enc,
+            model_attr,
+            attrs_train_val,
+            optimizer,
+            combined_ds,
+            device,
+            distance_fn=distance_fn,
+            n_episodes=50,
+            n_way=50,
+            n_query=10,
+            do_backward=True,
         )
         print(
             f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f} acc={train_acc:.4f}"

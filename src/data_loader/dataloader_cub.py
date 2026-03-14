@@ -116,6 +116,8 @@ class CUBDataset(Dataset):
             cls_set = set(range(1, N_TRAIN_CLASSES + 1))
         elif split == "val":
             cls_set = set(range(N_TRAIN_CLASSES + 1, N_TRAIN_CLASSES + N_VAL_CLASSES + 1))
+        elif split == "trainval":
+            cls_set = set(range(1, N_TRAIN_CLASSES + N_VAL_CLASSES + 1))
         elif split == "test":
             cls_set = set(
                 range(
