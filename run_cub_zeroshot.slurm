@@ -13,7 +13,7 @@
 #SBATCH --job-name=cub-zeroshot
 #SBATCH --output=experiments/logs/%x-%j.out
 #SBATCH --error=experiments/logs/%x-%j.err
-#SBATCH --time=3:00:00
+#SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
