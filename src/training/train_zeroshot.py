@@ -431,11 +431,6 @@ def main():
                 do_backward=False,
             )
 
-        print(
-            f"Epoch {epoch+1}/{args.epochs}  train_loss={train_loss:.4f}  "
-            f"train_acc={train_acc:.4f}  val_loss={val_loss:.4f}"
-        )
-
         improved = val_loss < (best_val_loss - float(args.early_stopping_min_delta))
         if improved:
             best_val_loss = val_loss
@@ -443,6 +438,13 @@ def main():
             epochs_since_improvement = 0
         else:
             epochs_since_improvement += 1
+
+        print(
+            f"Epoch {epoch+1}/{args.epochs}  "
+            f"train_loss={train_loss:.4f}  train_acc={train_acc:.4f}  "
+            f"val_loss={val_loss:.4f}  "
+            f"es_no_improve={epochs_since_improvement}/{args.early_stopping_patience}"
+        )
 
         if args.early_stopping_patience and epochs_since_improvement >= args.early_stopping_patience:
             print(
