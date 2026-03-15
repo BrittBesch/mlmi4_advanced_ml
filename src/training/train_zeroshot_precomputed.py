@@ -129,9 +129,9 @@ def run_episodes(
             episode_indices.extend(chosen)
             episode_labels.extend([local_idx] * n_query)
 
-        # Build tensors
+        # Build tensors — use dataset[i] so __getitem__ handles crop selection
         feats = torch.stack([
-            torch.from_numpy(dataset.features[i]) for i in episode_indices
+            dataset[i][0] for i in episode_indices
         ]).to(device)
         labels = torch.tensor(episode_labels, dtype=torch.long, device=device)
         cls_idx = torch.tensor(episode_classes, dtype=torch.long, device=device)
@@ -174,7 +174,8 @@ def evaluate(
     aux_tensor = torch.tensor(aux_features_test, dtype=torch.float32, device=device)
     prototypes = _l2_normalize(model_aux(aux_tensor))   # (n_test_classes, z_dim)
 
-    all_feats = torch.from_numpy(dataset.features).to(device)
+    # dataset is test_time=True so __getitem__ returns fixed middle crop
+    all_feats = torch.stack([dataset[i][0] for i in range(len(dataset))]).to(device)
     all_labels = torch.from_numpy(dataset.labels)
 
     z = model_img(all_feats)   # (N, z_dim)
