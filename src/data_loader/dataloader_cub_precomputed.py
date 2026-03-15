@@ -56,21 +56,15 @@ def _class_number(cls_name: str) -> int:
     return int(cls_name.split(".")[0])
 
 
-def _load_class_image_features(class_file: Path, test_time: bool = False) -> np.ndarray:
+def _load_class_image_features(class_file: Path) -> np.ndarray:
     """
     Load precomputed GoogLeNet features for one class.
 
-    Raw shape: (n_imgs, 1024, 10) where the 10 crops are:
-      middle, upper-left, upper-right, lower-left, lower-right of original image
-      + same 5 crops of the horizontally-flipped image.
-
-    Train: average all 10 crops → (n_imgs, 1024)
-    Test:  middle crop only (index 0) → (n_imgs, 1024)
+    Returns full (n_imgs, 1024, 10) array. Crop selection happens at
+    __getitem__ time: random crop per access during training (matching
+    Reed et al.'s torch.randperm sampling), fixed MIDDLE_CROP_IDX at test time.
     """
-    arr = np.array(torchfile.load(str(class_file)), dtype=np.float32)
-    if test_time:
-        return arr[:, :, MIDDLE_CROP_IDX]   # (n_imgs, 1024)
-    return arr.mean(axis=2)                  # (n_imgs, 1024)
+    return np.array(torchfile.load(str(class_file)), dtype=np.float32)  # (n_imgs, 1024, 10)
 
 
 def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
@@ -116,7 +110,6 @@ def load_split_data(
     split: str,
     aux_type: str = "attributes",
     cub_root: Optional[str] = None,
-    test_time: bool = False,
 ) -> Tuple[List[np.ndarray], np.ndarray, List[str]]:
     """
     Load all image features and class-level auxiliary features for a split.
@@ -126,10 +119,9 @@ def load_split_data(
         split: one of "train", "val", "test", "trainval"
         aux_type: "attributes" (312-dim, paper), "w2v" (400-dim), or "bow" (5726-dim)
         cub_root: path to CUB_200_2011 directory (required when aux_type="attributes")
-        test_time: if True, use only middle crop for image features (paper test protocol)
 
     Returns:
-        image_features_by_class: list of (n_imgs, 1024) arrays, one per class
+        image_features_by_class: list of (n_imgs, 1024, 10) arrays, one per class
         aux_features: (n_classes, aux_dim) class-level auxiliary embeddings
         class_names: list of class folder names in split order
     """
@@ -151,9 +143,7 @@ def load_split_data(
         img_file = root / "images" / f"{cls_name}.t7"
         if not img_file.exists():
             raise FileNotFoundError(f"Image feature file not found: {img_file}")
-        image_features_by_class.append(
-            _load_class_image_features(img_file, test_time=test_time)
-        )
+        image_features_by_class.append(_load_class_image_features(img_file))
 
     # Load auxiliary features
     if aux_type == "attributes":
@@ -209,23 +199,30 @@ class CUBPrecomputedDataset(Dataset):
             test_time: use middle crop only for image features (paper test protocol)
         """
         image_features_by_class, aux_features, class_names = load_split_data(
-            data_root, split, aux_type, cub_root=cub_root, test_time=test_time
+            data_root, split, aux_type, cub_root=cub_root
         )
         self.class_names = class_names
         self.aux_features = aux_features   # (n_classes, aux_dim)
+        self.test_time = test_time
 
         all_feats, all_labels = [], []
         for cls_idx, feats in enumerate(image_features_by_class):
             all_feats.append(feats)
             all_labels.extend([cls_idx] * feats.shape[0])
 
-        self.features = np.concatenate(all_feats, axis=0)   # (N, 1024)
-        self.labels = np.array(all_labels, dtype=np.int64)  # (N,)
+        # (N, 1024, 10) — all crops retained; selection happens in __getitem__
+        self.features = np.concatenate(all_feats, axis=0)
+        self.labels = np.array(all_labels, dtype=np.int64)
 
     def __len__(self) -> int:
         return len(self.labels)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        feat = torch.from_numpy(self.features[idx])
-        label = int(self.labels[idx])
-        return feat, label
+        crops = self.features[idx]   # (1024, 10)
+        if self.test_time:
+            feat = crops[:, MIDDLE_CROP_IDX]
+        else:
+            # Random crop per access, matching Reed et al.'s torch.randperm sampling
+            crop_idx = np.random.randint(0, crops.shape[1])
+            feat = crops[:, crop_idx]
+        return torch.from_numpy(feat.copy()), int(self.labels[idx])
