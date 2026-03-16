@@ -1,11 +1,9 @@
 # CUB zero-shot with precomputed features (Table 3 replication)
-# Uses data/cvpr2016_cub/ — precomputed GoogLeNet image features + w2v/bow class aux
+# Uses data/cvpr2016_cub/ — precomputed GoogLeNet image features + attribute class aux
 
 data:
   data_root: "data/cvpr2016_cub"
-  cub_root: "data/CUB_200_2011"   # needed for aux_type=attributes
-  aux_type: "attributes"           # paper: 312-dim CUB continuous attributes
-                                   # alternatives: "w2v" (400-dim), "bow" (5726-dim)
+  cub_root: "data/CUB_200_2011"   # paper: 312-dim CUB continuous attributes
 
 model:
   z_dim: 1024
