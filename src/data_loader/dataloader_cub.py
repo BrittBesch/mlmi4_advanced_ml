@@ -1,202 +1,200 @@
 """
-CUB-200-2011 dataloader for zero-shot learning (Table 3 replication).
+CUB dataloader using precomputed features from cvpr2016_cub (Reed et al., 2016).
 
-Loads images and class-level attributes. Supports the 100/50/50 class split
-(train/val/test) as in Snell et al. (2017), following Reed et al. (2016):
-100 training classes, 50 validation classes, 50 test classes.
-Dataset: https://data.caltech.edu/records/65de6-vp158
+Implements the data loading for Snell et al. (2017) Table 3 zero-shot CUB:
+  - Image features: precomputed 1024-dim GoogLeNet features (.t7 files)
+      10 crops per image: middle, upper-left, upper-right, lower-left, lower-right
+      of the original image and its horizontal flip (crop index 0 = middle original).
+      Train: average all 10 crops → (n_imgs, 1024).
+      Test:  middle crop only   → (n_imgs, 1024)  [paper: "middle crop of original"]
+  - Auxiliary class features: 312-dim continuous CUB attributes (paper) loaded
+      from CUB_200_2011/attributes/class_attribute_labels_continuous.txt.
+  - Class splits from the provided split text files (100/50/50 train/val/test)
+
+Data directory: data/cvpr2016_cub/
+  images/   *.t7  shape (n_imgs, 1024, 10) - precomputed GoogLeNet features
+  trainclasses.txt / valclasses.txt / testclasses.txt / trainvalclasses.txt
+
+Attributes (paper): data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt
 """
 
-import os
 from pathlib import Path
+from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
 
-# CUB has 200 classes. For zero-shot per Snell et al.:
-# 100 train, 50 val, 50 test classes.
-N_TOTAL_CLASSES = 200
-N_TRAIN_CLASSES = 100
-N_VAL_CLASSES = 50
-N_TEST_CLASSES = 50
-N_ATTRIBUTES = 312
+try:
+    import torchfile
+except ImportError as e:
+    raise ImportError("torchfile is required to read .t7 files: pip install torchfile") from e
+
+# Crop index 0 is the middle crop of the original image (paper test-time crop).
+MIDDLE_CROP_IDX = 0
+
+IMAGE_DIM = 1024
 
 
-def _read_lines(path: str) -> list[list[str]]:
-    with open(path) as f:
-        return [line.strip().split() for line in f if line.strip()]
+def _load_split_names(split_file: Path) -> List[str]:
+    """Return list of class folder names (e.g. '001.Black_footed_Albatross') from a split file."""
+    with open(split_file) as f:
+        return [line.strip() for line in f if line.strip()]
 
 
-def load_class_attributes(root: str) -> np.ndarray:
+def _class_number(cls_name: str) -> int:
+    """Extract 1-based class number from folder name e.g. '001.Black_footed_Albatross' → 1."""
+    return int(cls_name.split(".")[0])
+
+
+def _load_class_image_features(class_file: Path) -> np.ndarray:
     """
-    Load class-level attributes (200 x 312).
-    Expects attributes in root/attributes/class_attribute_labels_continuous.txt
-    (one row per class, 312 space-separated values). If not found, tries
-    root/class_attribute_labels_continuous.txt.
+    Load precomputed GoogLeNet features for one class.
+
+    Returns full (n_imgs, 1024, 10) array. Crop selection happens at
+    __getitem__ time: random crop per access during training (matching
+    Reed et al.'s torch.randperm sampling), fixed MIDDLE_CROP_IDX at test time.
     """
+    return np.array(torchfile.load(str(class_file)), dtype=np.float32)  # (n_imgs, 1024, 10)
+
+
+def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
+    """
+    Load 312-dim continuous CUB attributes for the given classes (paper aux modality).
+
+    Reads class_attribute_labels_continuous.txt (200 rows, one per class in order 1..200)
+    and returns rows corresponding to the requested class_names.
+
+    Args:
+        cub_root: path to CUB_200_2011 directory
+        class_names: list of class folder names e.g. ['001.Black_footed_Albatross', ...]
+
+    Returns:
+        (n_classes, 312) float32 attribute array
+    """
+    cub_root = Path(cub_root)
     for subpath in [
         "attributes/class_attribute_labels_continuous.txt",
         "class_attribute_labels_continuous.txt",
     ]:
-        p = Path(root) / subpath
-        if p.exists():
-            rows = _read_lines(str(p))
-            arr = np.array([[float(x) for x in row] for row in rows], dtype=np.float32)
-            assert arr.shape[1] == N_ATTRIBUTES, f"expected {N_ATTRIBUTES} attributes"
-            return arr
+        attr_file = cub_root / subpath
+        if attr_file.exists():
+            rows = []
+            with open(attr_file) as f:
+                all_rows = [
+                    [float(v) for v in line.strip().split()]
+                    for line in f if line.strip()
+                ]
+            for cls_name in class_names:
+                cls_idx = _class_number(cls_name) - 1   # 0-based row index
+                rows.append(all_rows[cls_idx])
+            return np.array(rows, dtype=np.float32)   # (n_classes, 312)
     raise FileNotFoundError(
-        f"No class attributes file found under {root}. "
+        f"CUB attributes file not found under {cub_root}. "
+        "Download CUB_200_2011.tgz from https://data.caltech.edu/records/65de6-vp158 "
+        "and extract to data/CUB_200_2011/."
     )
 
 
-def build_cub_index(root: str):
+def load_split_data(
+    data_root: str,
+    split: str,
+    cub_root: Optional[str] = None,
+) -> Tuple[List[np.ndarray], np.ndarray, List[str]]:
     """
-    Parse CUB_200_2011 images.txt and image_class_labels.txt.
-    Returns list of (image_path, class_id_1based), and number of classes.
-    """
-    root = Path(root)
-    images_file = root / "images.txt"
-    labels_file = root / "image_class_labels.txt"
-    if not images_file.exists() or not labels_file.exists():
-        raise FileNotFoundError(
-            f"CUB metadata not found under {root}. "
-            "Ensure images.txt and image_class_labels.txt exist (extract CUB_200_2011.tgz)."
-        )
-
-    # image_id -> path (e.g. "001.Black_footed_Albatross/Black_Footed_Albatross_0001.jpg")
-    id_to_path = {}
-    for parts in _read_lines(str(images_file)):
-        img_id, path = int(parts[0]), parts[1]
-        id_to_path[img_id] = path
-
-    # image_id -> class_id (1..200)
-    id_to_cls = {}
-    for parts in _read_lines(str(labels_file)):
-        img_id, cls = int(parts[0]), int(parts[1])
-        id_to_cls[img_id] = cls
-
-    img_dir = root / "images"
-    samples = []
-    for img_id, path in id_to_path.items():
-        if img_id not in id_to_cls:
-            continue
-        full_path = img_dir / path
-        if full_path.exists():
-            samples.append((str(full_path), id_to_cls[img_id]))
-    return samples
-
-
-class CUBDataset(Dataset):
-    """
-    CUB-200-2011 for zero-shot: images + labels. Class attributes loaded separately
-    via load_class_attributes() for building prototypes.
-
-    Splits are by class:
-        - train: classes 1..100
-        - val:   classes 101..150
-        - test:  classes 151..200
-    """
-
-    def __init__(self, root: str, split: str = "train", transform=None):
-        """
-        Args:
-            root: path to CUB_200_2011 (containing images/, images.txt, etc.)
-            split: "train", "val", or "test" (class-based split)
-            transform: optional transform applied to PIL image
-        """
-        self.root = Path(root)
-        self.transform = transform
-
-        samples = build_cub_index(str(self.root))
-        # class_id in CUB is 1..200
-        if split == "train":
-            cls_set = set(range(1, N_TRAIN_CLASSES + 1))
-        elif split == "val":
-            cls_set = set(range(N_TRAIN_CLASSES + 1, N_TRAIN_CLASSES + N_VAL_CLASSES + 1))
-        elif split == "test":
-            cls_set = set(
-                range(
-                    N_TRAIN_CLASSES + N_VAL_CLASSES + 1,
-                    N_TRAIN_CLASSES + N_VAL_CLASSES + N_TEST_CLASSES + 1,
-                )
-            )
-        else:
-            raise ValueError(f"Unknown split: {split}")
-
-        self.classes = sorted(cls_set)
-        self.samples = [(p, c) for p, c in samples if c in cls_set]
-
-        # Map class id (1..200) to index in this split's classes (0..len-1)
-        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, class_id = self.samples[idx]
-        img = Image.open(path).convert("RGB")
-        if self.transform:
-            img = self.transform(img)
-        label = self.class_to_idx[class_id]
-        return img, label
-
-
-def get_dataloader(config, split):
-    """
-    Build a DataLoader for a single CUB split (zero-shot, standard batching).
-
-    Uses TenCrop for training (paper setup) and CenterCrop for val/test.
-    Class attributes are loaded separately via load_class_attributes().
+    Load all image features and class-level auxiliary features for a split.
 
     Args:
-        config: dict with keys data_dir, image_size, batch_size, num_workers
-        split: "train", "val", or "test"
+        data_root: path to cvpr2016_cub directory
+        split: one of "train", "val", "test", "trainval"
+        cub_root: path to CUB_200_2011 directory
 
     Returns:
-        DataLoader for the requested split
+        image_features_by_class: list of (n_imgs, 1024, 10) arrays, one per class
+        aux_features: (n_classes, aux_dim) class-level auxiliary embeddings
+        class_names: list of class folder names in split order
     """
-    from torchvision import transforms
+    root = Path(data_root)
+    split_file_map = {
+        "train": root / "trainclasses.txt",
+        "val": root / "valclasses.txt",
+        "test": root / "testclasses.txt",
+        "trainval": root / "trainvalclasses.txt",
+    }
+    if split not in split_file_map:
+        raise ValueError(f"Unknown split '{split}'. Choose from: {list(split_file_map)}")
 
-    root = config.get("data_dir", "data/CUB_200_2011")
-    image_size = config.get("image_size", 224)
-    batch_size = config.get("batch_size", 32)
-    num_workers = config.get("num_workers", 0)
+    class_names = _load_split_names(split_file_map[split])
 
-    normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-    )
+    # Load image features
+    image_features_by_class = []
+    for cls_name in class_names:
+        img_file = root / "images" / f"{cls_name}.t7"
+        if not img_file.exists():
+            raise FileNotFoundError(f"Image feature file not found: {img_file}")
+        image_features_by_class.append(_load_class_image_features(img_file))
 
-    if split == "train":
-        transform = transforms.Compose(
-            [
-                transforms.Resize(256),
-                transforms.TenCrop(image_size),
-                transforms.Lambda(
-                    lambda crops: torch.stack(
-                        [normalize(transforms.ToTensor()(c)) for c in crops]
-                    )
-                ),
-            ]
+    # Load auxiliary features (attributes only)
+    if cub_root is None:
+        raise ValueError(
+            "cub_root must be provided. Set --cub_root data/CUB_200_2011"
         )
-    else:
-        transform = transforms.Compose(
-            [
-                transforms.Resize(256),
-                transforms.CenterCrop(image_size),
-                transforms.ToTensor(),
-                normalize,
-            ]
-        )
+    aux_features = load_cub_attributes(cub_root, class_names)
 
-    dataset = CUBDataset(root, split=split, transform=transform)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=(split == "train"),
-        num_workers=num_workers,
-        pin_memory=True,
-    )
-    return loader
+    return image_features_by_class, aux_features, class_names
+
+
+class CUBPrecomputedDataset(Dataset):
+    """
+    Dataset of precomputed GoogLeNet image features for CUB zero-shot learning.
+
+    Each item is (feature_vector, class_label) where:
+      - feature_vector: (1024,) float32 GoogLeNet feature
+      - class_label: int in [0, n_classes_in_split - 1]
+
+    Class-level auxiliary features (for building prototypes) are available via
+    the .aux_features attribute: (n_classes, aux_dim) float32 array.
+    """
+
+    def __init__(
+        self,
+        data_root: str,
+        split: str,
+        cub_root: Optional[str] = None,
+        test_time: bool = False,
+    ):
+        """
+        Args:
+            data_root: path to cvpr2016_cub directory
+            split: "train", "val", "test", or "trainval"
+            cub_root: path to CUB_200_2011
+            test_time: use middle crop only for image features (paper test protocol)
+        """
+        image_features_by_class, aux_features, class_names = load_split_data(
+            data_root, split, cub_root=cub_root
+        )
+        self.class_names = class_names
+        self.aux_features = aux_features   # (n_classes, aux_dim)
+        self.test_time = test_time
+
+        all_feats, all_labels = [], []
+        for cls_idx, feats in enumerate(image_features_by_class):
+            all_feats.append(feats)
+            all_labels.extend([cls_idx] * feats.shape[0])
+
+        # (N, 1024, 10) — all crops retained; selection happens in __getitem__
+        self.features = np.concatenate(all_feats, axis=0)
+        self.labels = np.array(all_labels, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        crops = self.features[idx]   # (1024, 10)
+        if self.test_time:
+            feat = crops[:, MIDDLE_CROP_IDX]
+        else:
+            # Random crop per access, matching Reed et al.'s torch.randperm sampling
+            crop_idx = np.random.randint(0, crops.shape[1])
+            feat = crops[:, crop_idx]
+        return torch.from_numpy(feat.copy()), int(self.labels[idx])

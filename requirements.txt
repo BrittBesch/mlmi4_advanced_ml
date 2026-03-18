@@ -20,5 +20,8 @@ seaborn>=0.12.0
 # Configuration Management
 PyYAML>=6.0
 
+# Precomputed CUB features (.t7 files)
+torchfile>=0.1.0
+
 # Progress Bars
 tqdm>=4.65.0

@@ -1,22 +1,41 @@
 """
-Zero-shot training and evaluation for CUB (Table 3 replication).
+Zero-shot training and evaluation for CUB using precomputed features (Table 3 replication).
 
-Train on seen classes: image encoder + attribute→embedding map; prototypes for
-seen classes = attribute_embed(attributes). At test time, prototypes for unseen
-classes = attribute_embed(unseen_attributes); classify by nearest prototype.
+Implements Snell et al. (2017) zero-shot CUB experiment with the precomputed
+GoogLeNet image features and 312-dim CUB attribute vectors.
+
+Architecture (paper):
+  f: linear(1024 → z_dim)   image encoder
+  g: linear(312  → z_dim)   class attribute encoder; prototypes L2-normalised
+
+Image features: data/cvpr2016_cub/images/*.t7  (precomputed GoogLeNet, Reed et al. 2016)
+  Train: average of all 10 crops per image
+  Test:  middle crop of original image only (paper: "At test time we use only the middle crop")
+
+Attributes: data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt
+  312-dim continuous attribute vectors, one per class
+
+Training (two-phase as in paper):
+  Phase 1: episodic 50-way, 10-query on train classes; early-stop on val loss
+  Phase 2: retrain on train+val for best_epoch epochs; evaluate on test
+
+Usage:
+  python src/training/train_zeroshot_precomputed.py \
+      --data_root data/cvpr2016_cub \
+      --cub_root data/CUB_200_2011
 """
 
 import argparse
 import os
+import random
 import sys
+from collections import defaultdict
 
 import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from torchvision import models
 
-# Add project root so we can import from mlmi4_advanced_ml
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -26,351 +45,348 @@ from loss import (
     euclidean_dist,
     build_distance,
 )
-from src.data_loader.dataloader_cub import get_dataloader, load_class_attributes
+from src.data_loader.dataloader_cub_precomputed import (
+    CUBPrecomputedDataset, AUX_DIMS, IMAGE_DIM,
+)
 from src.utils.device import get_device
 from src.utils.seed import set_seed
 
 
-# NOTE (Britt / models.py):
-# The following two classes define the *model* components used in the CUB
-# zero-shot experiment and could be moved into `model.py` to be shared by
-# multiple training scripts. They are kept here for now for clarity.
+class LinearImageEncoder(nn.Module):
+    """f_phi: linear map from precomputed image features to embedding space."""
 
-class CUBImageEncoder(nn.Module):
-    """
-    Image embedding f_φ for CUB.
-
-    In the paper, 1,024-dim GoogLeNet features are used and a linear map is
-    learned on top. Here we follow that setup by using a pretrained GoogLeNet
-    backbone frozen on ImageNet and learning only a linear head.
-    """
-
-    def __init__(self, z_dim: int = 1024):
+    def __init__(self, in_dim: int = IMAGE_DIM, z_dim: int = 1024):
         super().__init__()
-        # Pretrained GoogLeNet on ImageNet. We remove the final classifier so that
-        # the network outputs 1,024-dim pooled features.
-        self.backbone = models.googlenet(weights=models.GoogLeNet_Weights.IMAGENET1K_V1, aux_logits=False)
-        self.backbone.fc = nn.Identity()
-        for p in self.backbone.parameters():
-            p.requires_grad = False
-
-        self.z_dim = z_dim
-        self.fc = nn.Linear(1024, z_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x can be either:
-        # - (B, 3, H, W): single crop per image (val/test)
-        # - (B, Ncrops, 3, H, W): multiple crops per image (train with TenCrop)
-        if x.dim() == 5:
-            b, n_crops, c, h, w = x.shape
-            x = x.view(b * n_crops, c, h, w)
-            with torch.no_grad():
-                feats = self.backbone(x)
-            feats = feats.view(b, n_crops, -1).mean(1)
-        else:
-            with torch.no_grad():
-                feats = self.backbone(x)
-        return self.fc(feats)
-
-
-class AttributeEmbedding(nn.Module):
-    """
-    Map class attributes (312-dim) to embedding space (z_dim).
-
-    In the paper this is a simple linear map 312 → 1024, with unit-length
-    prototypes after embedding.
-    """
-
-    def __init__(self, attr_dim: int = 312, z_dim: int = 1024):
-        super().__init__()
-        self.fc = nn.Linear(attr_dim, z_dim)
-        self.z_dim = z_dim
+        self.fc = nn.Linear(in_dim, z_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
 
 
-# ------ Training and evaluation ------
+class LinearAuxEncoder(nn.Module):
+    """g_phi: linear map from class auxiliary features to embedding space."""
+
+    def __init__(self, aux_dim: int, z_dim: int = 1024):
+        super().__init__()
+        self.fc = nn.Linear(aux_dim, z_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
+
+
 def _l2_normalize(x: torch.Tensor, dim: int = 1, eps: float = 1e-8) -> torch.Tensor:
     return x / (x.norm(p=2, dim=dim, keepdim=True) + eps)
 
 
-def train_epoch(model_enc, model_attr, attributes_split, optimizer, loader, device,
-                distance_fn=None):
+def run_episodes(
+    model_img,
+    model_aux,
+    aux_features_split: np.ndarray,
+    optimizer,
+    dataset: CUBPrecomputedDataset,
+    device: torch.device,
+    distance_fn,
+    n_episodes: int,
+    n_way: int,
+    n_query: int,
+    do_backward: bool,
+) -> tuple:
     """
-    Run one training epoch.
+    Run episodic training or validation for one epoch.
 
-    distance_fn controls which distance metric is used to compare image
-    embeddings to class prototypes:
-      - None / euclidean_dist  →  Experiment 1: paper baseline
-      - DiagonalMahalanobisDistance instance  →  Experiment 2: EXTENSION
-      - LowRankMahalanobisDistance  instance  →  Experiment 3: EXTENSION
-
-    Note: prototypes are recomputed inside every batch loop so that
-    model_attr receives gradients and actually learns.  (Computing them
-    once outside the loop with torch.no_grad() would silently block all
-    gradients from reaching model_attr.)
+    Each episode:
+      1. Sample n_way classes from the split
+      2. Sample n_query images per class as queries (zero-shot: no support set)
+      3. Prototypes = g(aux_features[episode_classes])
+      4. Loss = prototypical NLL over query embeddings vs prototypes
     """
-    if distance_fn is None:
-        distance_fn = euclidean_dist
-
-    model_enc.train()
-    model_attr.train()
-    # If distance_fn is a learnable module, set it to train mode too.
+    model_img.train(do_backward)
+    model_aux.train(do_backward)
     if isinstance(distance_fn, nn.Module):
-        distance_fn.train()
+        distance_fn.train(do_backward)
 
-    total_loss = 0.0
-    total_acc = 0.0
-    n_batches = 0
+    aux_tensor = torch.tensor(aux_features_split, dtype=torch.float32, device=device)
 
-    # Convert fixed class attributes to a tensor once (they don't change).
-    att = torch.tensor(attributes_split, dtype=torch.float32, device=device)
+    # Build per-class index lists once
+    indices_per_class: dict = defaultdict(list)
+    for idx in range(len(dataset)):
+        indices_per_class[int(dataset.labels[idx])].append(idx)
+    all_classes = [c for c in indices_per_class if len(indices_per_class[c]) > 0]
 
-    for images, labels in tqdm(loader, desc="Train", leave=False):
-        images = images.to(device)
-        labels = labels.to(device)
-        optimizer.zero_grad()
+    total_loss, total_acc = 0.0, 0.0
 
-        # Recompute prototypes each step so gradients flow back through
-        # model_attr.  L2-normalise as in the paper (unit-length prototypes).
-        prototypes = _l2_normalize(model_attr(att))   # (n_classes, z_dim)
+    for _ in tqdm(range(n_episodes), desc="episodes", leave=False):
+        n_avail = len(all_classes)
+        this_way = min(n_way, n_avail)
+        episode_classes = random.sample(all_classes, this_way)
 
-        z = model_enc(images)                          # (B, z_dim)
-        loss, acc = prototypical_loss_from_prototypes(
-            z, prototypes, labels, distance_fn=distance_fn
-        )
-        loss.backward()
-        optimizer.step()
+        # Collect query indices and local labels
+        episode_indices, episode_labels = [], []
+        for local_idx, c in enumerate(episode_classes):
+            pool = indices_per_class[c]
+            chosen = random.sample(pool, n_query) if len(pool) >= n_query \
+                else [random.choice(pool) for _ in range(n_query)]
+            episode_indices.extend(chosen)
+            episode_labels.extend([local_idx] * n_query)
+
+        # Build tensors — use dataset[i] so __getitem__ handles crop selection
+        feats = torch.stack([
+            dataset[i][0] for i in episode_indices
+        ]).to(device)
+        labels = torch.tensor(episode_labels, dtype=torch.long, device=device)
+        cls_idx = torch.tensor(episode_classes, dtype=torch.long, device=device)
+
+        # Forward
+        if do_backward:
+            prototypes = _l2_normalize(model_aux(aux_tensor[cls_idx]))
+            z = model_img(feats)
+            loss, acc = prototypical_loss_from_prototypes(z, prototypes, labels, distance_fn)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        else:
+            with torch.no_grad():
+                prototypes = _l2_normalize(model_aux(aux_tensor[cls_idx]))
+                z = model_img(feats)
+                loss, acc = prototypical_loss_from_prototypes(z, prototypes, labels, distance_fn)
+
         total_loss += loss.item()
         total_acc += acc.item()
-        n_batches += 1
 
-    return total_loss / max(n_batches, 1), total_acc / max(n_batches, 1)
+    return total_loss / max(n_episodes, 1), total_acc / max(n_episodes, 1)
 
 
 @torch.no_grad()
-def evaluate(model_enc, model_attr, attributes_unseen, loader, device,
-             distance_fn=None):
-    """
-    Evaluate zero-shot accuracy on unseen classes.
-
-    Pass the *same* distance_fn used during training so the learned metric
-    is applied at inference time.  Defaults to euclidean_dist.
-    """
-    if distance_fn is None:
-        distance_fn = euclidean_dist
-
-    model_enc.eval()
-    model_attr.eval()
+def evaluate(
+    model_img,
+    model_aux,
+    aux_features_test: np.ndarray,
+    dataset: CUBPrecomputedDataset,
+    device: torch.device,
+    distance_fn,
+) -> float:
+    """Zero-shot accuracy: prototypes from aux features, queries from test images."""
+    model_img.eval()
+    model_aux.eval()
     if isinstance(distance_fn, nn.Module):
         distance_fn.eval()
 
-    att = torch.tensor(attributes_unseen, dtype=torch.float32, device=device)
-    prototypes = _l2_normalize(model_attr(att))   # (n_unseen, z_dim)
+    aux_tensor = torch.tensor(aux_features_test, dtype=torch.float32, device=device)
+    prototypes = _l2_normalize(model_aux(aux_tensor))   # (n_test_classes, z_dim)
 
-    total, correct = 0, 0
-    for images, labels in loader:
-        images = images.to(device)
-        z = model_enc(images)                      # (B, z_dim)
-        dists = distance_fn(z, prototypes)         # (B, n_unseen)
-        pred = dists.argmin(1)
-        correct += (pred.cpu() == labels).sum().item()
-        total += labels.size(0)
-    return correct / max(total, 1)
+    # dataset is test_time=True so __getitem__ returns fixed middle crop
+    all_feats = torch.stack([dataset[i][0] for i in range(len(dataset))]).to(device)
+    all_labels = torch.from_numpy(dataset.labels)
+
+    z = model_img(all_feats)   # (N, z_dim)
+    dists = distance_fn(z, prototypes)   # (N, n_test_classes)
+    pred = dists.argmin(1).cpu()
+    acc = (pred == all_labels).float().mean().item()
+    return acc
 
 
-def load_config(config_path: str) -> dict:
-    if not os.path.isfile(config_path):
+def build_models(aux_dim: int, z_dim: int, device: torch.device, dist_cfg: dict):
+    model_img = LinearImageEncoder(in_dim=IMAGE_DIM, z_dim=z_dim).to(device)
+    model_aux = LinearAuxEncoder(aux_dim=aux_dim, z_dim=z_dim).to(device)
+    distance_fn = build_distance(dist_cfg, z_dim, device)
+    return model_img, model_aux, distance_fn
+
+
+def build_optimizer(model_img, model_aux, distance_fn, lr: float, weight_decay: float):
+    dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
+    return torch.optim.Adam(
+        list(model_img.parameters()) + list(model_aux.parameters()) + dist_params,
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+
+def load_config(path: str) -> dict:
+    if not os.path.isfile(path):
         return {}
     import yaml
-    with open(config_path) as f:
+    with open(path) as f:
         return yaml.safe_load(f) or {}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Zero-shot CUB (Table 3)")
-    parser.add_argument("--config", type=str, default="", help="Path to cub_config.yaml (optional)")
-    parser.add_argument("--data_root", type=str, default="data/CUB_200_2011", help="CUB dataset root")
+    parser = argparse.ArgumentParser(
+        description="Zero-shot CUB with precomputed features (Table 3)"
+    )
+    parser.add_argument("--config", type=str, default="",
+                        help="Path to cub_precomputed_config.yaml (optional)")
+    parser.add_argument("--data_root", type=str, default="data/cvpr2016_cub")
+    parser.add_argument("--cub_root", type=str, default="data/CUB_200_2011",
+                        help="Path to CUB_200_2011 (required for aux_type=attributes)")
+    parser.add_argument("--aux_type", type=str, default="attributes",
+                        choices=["attributes", "w2v", "bow"],
+                        help="Auxiliary modality: 'attributes' (312-dim, paper), "
+                             "'w2v' (400-dim), or 'bow' (5726-dim)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--z_dim", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_way", type=int, default=50,
+                        help="Episode n-way (paper: 50)")
+    parser.add_argument("--n_query", type=int, default=10,
+                        help="Queries per class per episode (paper: 10)")
+    parser.add_argument("--n_episodes", type=int, default=100,
+                        help="Training episodes per epoch (not specified in paper)")
+    parser.add_argument("--val_episodes", type=int, default=20,
+                        help="Validation episodes per epoch (not specified in paper)")
+    parser.add_argument("--early_stopping_patience", type=int, default=10)
+    parser.add_argument("--early_stopping_min_delta", type=float, default=0.0)
     parser.add_argument("--save_dir", type=str, default="experiments/checkpoints")
-    parser.add_argument("--exp_name", type=str, default="cub_zeroshot")
-
-    # EXTENSION: distance metric selection
-    # Experiment 1: --distance euclidean  (paper baseline, no extra parameters)
-    # Experiment 2: --distance diagonal   (diagonal Mahalanobis, d extra params)
-    # Experiment 3: --distance lowrank    (low-rank Mahalanobis, d×r extra params)
-    parser.add_argument(
-        "--distance", type=str, default="euclidean",
-        choices=["euclidean", "diagonal", "lowrank"],
-        help="Distance metric to use.  'euclidean' reproduces the paper; "
-             "'diagonal' and 'lowrank' are EXTENSION experiments.",
-    )
-    parser.add_argument(
-        "--lowrank_r", type=int, default=64,
-        help="EXTENSION: rank r for low-rank Mahalanobis (only used when "
-             "--distance=lowrank).  r=64 gives 64×1024=65 536 extra params.",
-    )
-
+    parser.add_argument("--exp_name", type=str, default="cub_zeroshot_precomputed")
+    parser.add_argument("--distance", type=str, default="euclidean",
+                        choices=["euclidean", "diagonal", "lowrank"])
+    parser.add_argument("--lowrank_r", type=int, default=64)
     args = parser.parse_args()
 
-    cfg = load_config(args.config or os.path.join(PROJECT_ROOT, "configs", "cub_config.yaml"))
+    cfg = load_config(args.config or os.path.join(PROJECT_ROOT, "configs",
+                                                   "cub_precomputed_config.yaml"))
     if cfg:
-        data_cfg = cfg.get("data", {})
-        train_cfg = cfg.get("training", {})
-        exp_cfg = cfg.get("experiment", {})
-        args.data_root = data_cfg.get("data_dir", args.data_root)
-        args.image_size = data_cfg.get("image_size", args.image_size)
-        args.batch_size = data_cfg.get("batch_size", args.batch_size)
-        args.epochs = train_cfg.get("epochs", args.epochs)
-        args.lr = train_cfg.get("lr", args.lr)
-        args.seed = exp_cfg.get("seed", args.seed)
-        args.save_dir = exp_cfg.get("save_dir", args.save_dir)
-        args.exp_name = exp_cfg.get("exp_name", args.exp_name)
+        d = cfg.get("data", {})
+        t = cfg.get("training", {})
+        e = cfg.get("experiment", {})
+        args.data_root = d.get("data_root", args.data_root)
+        args.cub_root = d.get("cub_root", args.cub_root)
+        args.aux_type = d.get("aux_type", args.aux_type)
+        args.epochs = t.get("epochs", args.epochs)
+        args.lr = t.get("lr", args.lr)
+        args.n_way = t.get("n_way", args.n_way)
+        args.n_query = t.get("n_query", args.n_query)
+        args.n_episodes = t.get("n_episodes", args.n_episodes)
+        args.val_episodes = t.get("val_episodes", args.val_episodes)
+        es = t.get("early_stopping", {}) or {}
+        args.early_stopping_patience = es.get("patience", args.early_stopping_patience)
+        args.early_stopping_min_delta = es.get("min_delta", args.early_stopping_min_delta)
+        args.seed = e.get("seed", args.seed)
+        args.save_dir = e.get("save_dir", args.save_dir)
+        args.exp_name = e.get("exp_name", args.exp_name)
         if "z_dim" in cfg.get("model", {}):
             args.z_dim = cfg["model"]["z_dim"]
 
     set_seed(args.seed)
     device = get_device()
 
-    data_cfg = {
-        "data_dir": args.data_root,
-        "image_size": args.image_size,
-        "batch_size": args.batch_size,
-        "num_workers": 0,
-    }
-    train_loader = get_dataloader(data_cfg, "train")
-    val_loader = get_dataloader(data_cfg, "val")
-    test_loader = get_dataloader(data_cfg, "test")
-    attributes = load_class_attributes(args.data_root)
-
-    # 100 train, 50 val, 50 test classes (rows 0..99, 100..149, 150..199)
-    attrs_train = attributes[:100]
-    attrs_val = attributes[100:150]
-    attrs_test = attributes[150:]
-
-    model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
-    model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
-
-    # ---- EXTENSION: distance metric ------------------------------------------
-    # Experiment 1 (baseline) : --distance euclidean  → no extra module/params
-    # Experiment 2 (EXTENSION): --distance diagonal   → DiagonalMahalanobisDistance
-    # Experiment 3 (EXTENSION): --distance lowrank    → LowRankMahalanobisDistance
+    aux_dim = AUX_DIMS[args.aux_type]
     dist_cfg = {"distance": args.distance, "lowrank_r": args.lowrank_r}
-    distance_fn = build_distance(dist_cfg, args.z_dim, device)
 
-    # Collect learnable parameters from the distance module (empty list for Euclidean).
-    dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
-    print(f"Distance metric : {args.distance}"
-          + (f"  (rank={args.lowrank_r})" if args.distance == "lowrank" else ""))
-    print(f"Distance params : {sum(p.numel() for p in dist_params)}")
-    # --------------------------------------------------------------------------
+    print(f"Loading CUB precomputed features from {args.data_root}")
+    print(f"Auxiliary modality: {args.aux_type} ({aux_dim}-dim)")
+    print(f"Distance metric: {args.distance}")
 
-    optimizer = torch.optim.Adam(
-        list(model_enc.parameters()) + list(model_attr.parameters()) + dist_params,
-        lr=args.lr,
-        weight_decay=1e-5,
+    cub_root = args.cub_root if args.aux_type == "attributes" else None
+
+    # Train: average all 10 crops. Val/test: middle crop only (paper).
+    train_ds = CUBPrecomputedDataset(
+        args.data_root, split="train", aux_type=args.aux_type,
+        cub_root=cub_root, test_time=False,
+    )
+    val_ds = CUBPrecomputedDataset(
+        args.data_root, split="val", aux_type=args.aux_type,
+        cub_root=cub_root, test_time=True,
+    )
+    test_ds = CUBPrecomputedDataset(
+        args.data_root, split="test", aux_type=args.aux_type,
+        cub_root=cub_root, test_time=True,
     )
 
-    os.makedirs(args.save_dir, exist_ok=True)
+    print(f"Train: {len(train_ds.class_names)} classes, {len(train_ds)} images")
+    print(f"Val:   {len(val_ds.class_names)} classes, {len(val_ds)} images")
+    print(f"Test:  {len(test_ds.class_names)} classes, {len(test_ds)} images")
+
+    # Phase 1: train on train classes, early-stop on val
+    model_img, model_aux, distance_fn = build_models(aux_dim, args.z_dim, device, dist_cfg)
+    optimizer = build_optimizer(model_img, model_aux, distance_fn, args.lr, weight_decay=1e-5)
+
     best_val_loss = float("inf")
     best_epoch = 0
+    epochs_no_improve = 0
 
-    # Phase 1: train on train classes, early-stop on val loss (as in paper)
     for epoch in range(args.epochs):
-        train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train, optimizer, train_loader, device,
-            distance_fn=distance_fn,   # pass chosen metric (Exp 1/2/3)
+        train_loss, train_acc = run_episodes(
+            model_img, model_aux, train_ds.aux_features,
+            optimizer, train_ds, device, distance_fn,
+            n_episodes=args.n_episodes, n_way=args.n_way,
+            n_query=args.n_query, do_backward=True,
         )
-
-        # Validation loss on val classes (same metric as training)
-        model_enc.eval()
-        model_attr.eval()
-        if isinstance(distance_fn, nn.Module):
-            distance_fn.eval()
-        with torch.no_grad():
-            att_val = torch.tensor(attrs_val, dtype=torch.float32, device=device)
-            prototypes_val = _l2_normalize(model_attr(att_val))
-            val_loss = 0.0
-            n_batches = 0
-            for images, labels in val_loader:
-                images = images.to(device)
-                labels = labels.to(device)
-                z = model_enc(images)
-                loss, _ = prototypical_loss_from_prototypes(
-                    z, prototypes_val, labels, distance_fn=distance_fn
-                )
-                val_loss += loss.item()
-                n_batches += 1
-            val_loss /= max(n_batches, 1)
+        val_loss, val_acc = run_episodes(
+            model_img, model_aux, val_ds.aux_features,
+            optimizer, val_ds, device, distance_fn,
+            n_episodes=args.val_episodes, n_way=min(50, len(val_ds.class_names)),
+            n_query=args.n_query, do_backward=False,
+        )
 
         print(
-            f"Epoch {epoch+1}/{args.epochs}  train_loss={train_loss:.4f}  "
-            f"train_acc={train_acc:.4f}  val_loss={val_loss:.4f}"
+            f"Epoch {epoch+1}/{args.epochs}  "
+            f"train_loss={train_loss:.4f}  train_acc={train_acc:.4f}  "
+            f"val_loss={val_loss:.4f}  val_acc={val_acc:.4f}"
         )
 
-        if val_loss < best_val_loss:
+        improved = val_loss < best_val_loss - float(args.early_stopping_min_delta)
+        if improved:
             best_val_loss = val_loss
             best_epoch = epoch + 1
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
-    # Phase 2: retrain on train+val for best_epoch epochs, then evaluate on test
-    from torch.utils.data import ConcatDataset, DataLoader
+        if args.early_stopping_patience and epochs_no_improve >= args.early_stopping_patience:
+            print(
+                f"Early stopping at epoch {epoch+1} "
+                f"(best epoch={best_epoch}, val_loss={best_val_loss:.4f})"
+            )
+            break
 
-    combined_ds = ConcatDataset([train_loader.dataset, val_loader.dataset])
-    combined_loader = DataLoader(
-        combined_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True
+    if best_epoch <= 0:
+        best_epoch = 1
+
+    # Phase 2: retrain on train+val for best_epoch epochs, evaluate on test
+    print(f"\nPhase 2: retraining on train+val for {best_epoch} epoch(s)...")
+    trainval_ds = CUBPrecomputedDataset(
+        args.data_root, split="trainval", aux_type=args.aux_type,
+        cub_root=cub_root, test_time=False,
     )
-    attrs_train_val = attributes[:150]  # 100 train + 50 val
+    print(f"Train+val: {len(trainval_ds.class_names)} classes, {len(trainval_ds)} images")
 
-    # Reinitialise models, distance module, and optimizer from scratch.
-    # Phase 2 must start from the same initial conditions as Phase 1 so
-    # that training for best_epoch steps is a faithful replay.
     set_seed(args.seed)
-    model_enc = CUBImageEncoder(z_dim=args.z_dim).to(device)
-    model_attr = AttributeEmbedding(attr_dim=312, z_dim=args.z_dim).to(device)
-    distance_fn = build_distance(dist_cfg, args.z_dim, device)   # fresh distance module
-    dist_params = list(distance_fn.parameters()) if isinstance(distance_fn, nn.Module) else []
-    optimizer = torch.optim.Adam(
-        list(model_enc.parameters()) + list(model_attr.parameters()) + dist_params,
-        lr=args.lr,
-        weight_decay=1e-5,
-    )
+    model_img, model_aux, distance_fn = build_models(aux_dim, args.z_dim, device, dist_cfg)
+    optimizer = build_optimizer(model_img, model_aux, distance_fn, args.lr, weight_decay=1e-5)
 
     for epoch in range(best_epoch):
-        train_loss, train_acc = train_epoch(
-            model_enc, model_attr, attrs_train_val, optimizer, combined_loader, device,
-            distance_fn=distance_fn,   # same metric as Phase 1
+        train_loss, train_acc = run_episodes(
+            model_img, model_aux, trainval_ds.aux_features,
+            optimizer, trainval_ds, device, distance_fn,
+            n_episodes=args.n_episodes, n_way=args.n_way,
+            n_query=args.n_query, do_backward=True,
         )
-        print(
-            f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f} acc={train_acc:.4f}"
-        )
+        print(f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f}  acc={train_acc:.4f}")
 
-    test_acc = evaluate(
-        model_enc, model_attr, attrs_test, test_loader, device,
-        distance_fn=distance_fn,   # use learned metric at inference time
-    )
+    test_acc = evaluate(model_img, model_aux, test_ds.aux_features, test_ds, device, distance_fn)
+    print(f"\nFinal zero-shot test accuracy ({len(test_ds.class_names)}-way): {test_acc:.4f}")
 
-    # Save checkpoint; include distance module state for EXTENSION experiments.
+    # Save checkpoint
+    os.makedirs(args.save_dir, exist_ok=True)
     ckpt = {
         "best_epoch": best_epoch,
+        "aux_type": args.aux_type,
         "distance": args.distance,
-        "encoder": model_enc.state_dict(),
-        "attr_embed": model_attr.state_dict(),
+        "z_dim": args.z_dim,
+        "img_encoder": model_img.state_dict(),
+        "aux_encoder": model_aux.state_dict(),
         "test_acc": test_acc,
     }
     if isinstance(distance_fn, nn.Module):
-        # EXTENSION: persist learned metric parameters alongside the model.
         ckpt["distance_fn"] = distance_fn.state_dict()
 
-    path = os.path.join(args.save_dir, f"{args.exp_name}_{args.distance}_best.pt")
+    path = os.path.join(
+        args.save_dir,
+        f"{args.exp_name}_{args.aux_type}_{args.distance}_best.pt"
+    )
     torch.save(ckpt, path)
-    print(f"Final zero-shot test accuracy (50-way): {test_acc:.4f}")
-    print(f"  -> saved checkpoint to {path}")
+    print(f"Checkpoint saved to {path}")
 
 
 if __name__ == "__main__":
