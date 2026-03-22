@@ -1,0 +1,10 @@
+JobID: 25165185
+======
+Time: Sun Mar 15 19:18:44 GMT 2026
+Running on master node: gpu-q-10
+Current directory: /rds/user/ttttd2/hpc-work/MLMI4/mlmi4_advanced_ml
+
+Executing command:
+==================
+PYTHONPATH=. python -u src/training/train_fewshot_speech.py configs/speech_config.yaml
+

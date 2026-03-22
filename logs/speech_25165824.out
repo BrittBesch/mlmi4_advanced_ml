@@ -1,0 +1,10 @@
+JobID: 25165824
+======
+Time: Sun Mar 15 19:56:09 GMT 2026
+Running on master node: gpu-q-7
+Current directory: /rds/user/ttttd2/hpc-work/MLMI4/mlmi4_advanced_ml
+
+Installing torchaudio...
+Requirement already satisfied: torchaudio in ./mlmi4_env/lib/python3.8/site-packages (2.4.1)
+
+Downloading Speech Commands dataset...

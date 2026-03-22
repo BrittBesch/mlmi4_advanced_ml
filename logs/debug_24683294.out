@@ -1,0 +1,18 @@
+Changed directory to /rds/user/ttttd2/hpc-work/MLMI4/mlmi4_advanced_ml.
+
+JobID: 24683294
+======
+Time: Tue Mar 10 10:51:18 GMT 2026
+Running on master node: gpu-q-2
+Current directory: /rds/user/ttttd2/hpc-work/MLMI4/mlmi4_advanced_ml
+
+Nodes allocated:
+================
+gpu-q-2
+
+numtasks=1, numnodes=1, mpi_tasks_per_node=1 (OMP_NUM_THREADS=1)
+
+Executing command:
+==================
+PYTHONPATH=. python -u src/training/train_fewshot.py configs/debug_config.yaml
+
