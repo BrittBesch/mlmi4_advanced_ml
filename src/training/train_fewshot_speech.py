@@ -19,8 +19,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # ---- Team module imports and dependencies ----
-from model import ProtoNetEncoder  #from jack's model.py
-from loss import prototypical_loss, build_distance  #name matching with britt's loss.py code
+from model import ProtoNetEncoder
+from loss import prototypical_loss, build_distance
 
 # Import the Speech dataloader
 from src.data_loader.dataloader_speech import get_dataloader as get_speech_loader
@@ -105,7 +105,7 @@ def evaluate(model, val_loader, n_support, distance_fn, device):
     return mean_acc, mean_loss, ci95
 
 
-def train(config):      #### will introduce configs with YAML to match britt and thao
+def train(config):
     """Main training loop."""
 
     data_config = config['data']

@@ -10,18 +10,17 @@ log_interval: 100
 val_interval: 1000
 output_dir: "results/table2_1shot"
 
-# Distance metric - read by Britt's build_distance()
-# Options: "euclidean" (baseline), "diagonal", "lowrank"
+# Distance metric - options: "euclidean" (baseline), "diagonal", "lowrank"
 distance: "euclidean"
 
-# Data config - passed to Thao's get_dataloader(data_config, split)
+# Data config
 data:
   dataset: "miniimagenet"
   data_dir: "./data/miniimagenet"
   num_workers: 4
   use_cutout: false
   cutout_prob: 0.0
-  use_colour_jitter: false #calling this for my extension task
+  use_colour_jitter: false
   train_params:
     n_episodes: 15000
     n_way: 5            # paper: 30-way training for 1-shot
