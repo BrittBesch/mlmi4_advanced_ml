@@ -62,17 +62,21 @@ class SpeechCommandsFewShot(Dataset):
         # Dictionary to temporarily hold valid index mappings for our specific split
         class_samples = {cls: [] for cls in self.classes}
         
+        # Map the string label to an integer index (0 to N-1) for the Prototypical Sampler
+        self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(self.classes)}
+        
         print(f"[{split.upper()}] Filtering Speech Commands...")
         
-        # 4. Filtering: Scan the dataset to find valid 1-second clips
+        # 4. Filtering: Scan the dataset using just the file paths (Instant!)
         for i in range(len(self.base_dataset)):
-            # torchaudio returns: (waveform, sample_rate, label, speaker_id, utterance_number)
-            waveform, sample_rate, label, _, _ = self.base_dataset[i]
+            # The _walker attribute holds the raw file paths. 
+            # We extract the label from the parent folder name (e.g., '.../cat/1234.wav' -> 'cat')
+            path = str(self.base_dataset._walker[i])
+            label = os.path.basename(os.path.dirname(path))
             
+            # If it belongs to our current split, save the index WITHOUT loading the audio!
             if label in self.class_to_idx:
-                # Filter out utterances which are less than 1 second (i.e. 16000 frames at 16kHz)
-                if waveform.shape[1] >= 16000:
-                    class_samples[label].append(i)
+                class_samples[label].append(i)
         
         self.data_indices = []
         self.labels = []
@@ -111,8 +115,14 @@ class SpeechCommandsFewShot(Dataset):
         dataset_idx = self.data_indices[idx]
         waveform, _, _, _, _ = self.base_dataset[dataset_idx]
         
-        # Truncate to exactly 16000 frames (in case some clips are slightly longer)
-        waveform = waveform[:, :16000]
+        # Ensure exactly 16000 frames
+        if waveform.shape[1] >= 16000:
+            # Truncate slightly longer clips
+            waveform = waveform[:, :16000]
+        else:
+            # Pad shorter clips with zeros (silence)
+            pad_amount = 16000 - waveform.shape[1]
+            waveform = torch.nn.functional.pad(waveform, (0, pad_amount))
         
         # Apply the MFCC transform (Converting 1D Audio to 2D Tensor)
         if self.transform is not None:

@@ -130,9 +130,11 @@ def train(config):      #### will introduce configs with YAML to match britt and
 
     if model_type == 'tc_resnet8':
         print("--> Initializing TC-ResNet-8")
+        embed_dim = 64
         model = TCResNet8(embedding_dim=embed_dim).to(device)
     else:
         print("--> Initializing Baseline SpeechC64")
+        embed_dim = 384  # <flattened C64 output
         model = SpeechC64(
             hidden_dim=model_config.get('hidden_dim', 64),
             dropblock_size=model_config.get('dropblock_size', 0),
