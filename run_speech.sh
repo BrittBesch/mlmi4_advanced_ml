@@ -32,6 +32,7 @@ source ${SLURM_SUBMIT_DIR}/mlmi4_env/bin/activate
 application="PYTHONPATH=. python -u src/training/train_fewshot_speech.py"
 
 cd $SLURM_SUBMIT_DIR
+mkdir -p ./data/speech
 mkdir -p logs
 
 echo -e "JobID: $SLURM_JOB_ID\n======"
