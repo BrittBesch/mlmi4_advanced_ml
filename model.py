@@ -15,9 +15,7 @@ For 84x84 miniImageNet images -> 1600-dim output space
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-#from loss import euclidean_dist ### linking with Britt's loss.py code
-
+from torchvision.models import resnet18, ResNet18_Weights
 
 #####################################################################################################################
 ## Extension: Introducing Cutout and DropBlock techniques for Extension pt 1
@@ -65,12 +63,13 @@ class DropBlock(nn.Module):
         block_mask = block_mask[:, :, :h, :w]
         keep_mask = 1.0 - block_mask
 
-        count = keep_mask.numel()
         count_ones = keep_mask.sum()
         if count_ones == 0:
             return torch.zeros_like(x)
 
-        return x * keep_mask * (count / count_ones)
+        # Cap rescaling to prevent explosion on small feature maps
+        scale = min((keep_mask.numel() / count_ones).item(), 10.0)
+        return x * keep_mask * scale
 
 ########################################################################################## end of extension code add-ins
 
@@ -92,6 +91,22 @@ class ConvBlock(nn.Module):
             x = self.drop_block(x)
         return x
 
+### BRINGING IN THE RESNET ENCODER FOR EXTENSION   
+
+class ResNetEncoder(nn.Module):
+    def __init__(self, in_channels=3):
+        super().__init__()
+        if in_channels != 3:
+            raise ValueError("Resnet18 requires 3 input channels")
+        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        self.encoder = nn.Sequential(*list(resnet.children())[:-1])  # Remove final so we are just doing feature extraction
+        self.embed_dim=512
+        
+    def forward(self,x):
+        x = self.encoder(x)
+        return x.view(x.size(0), -1)
+    
+    
 
 class ProtoNetEncoder(nn.Module):
     """
@@ -103,50 +118,31 @@ class ProtoNetEncoder(nn.Module):
         hidden_dim: Number of filters per conv block (default 64)
     """
     def __init__(self, in_channels, hidden_dim=64,
-                    dropblock_size=0, dropblock_prob=0.1):
+                    dropblock_size=0, dropblock_prob=0.1, backbone='conv4'):
             super().__init__()
+            
+            if backbone=='resnet18':
+                self.encoder = ResNetEncoder(in_channels=in_channels)
+                self.embed_dim=512
+                
+            else:
+                # DropBlock on conv blocks 3 & 4 only (leaving early layers alone atm)
+                db = DropBlock(block_size=dropblock_size, drop_prob=dropblock_prob) \
+                    if dropblock_size > 0 else None
 
-            # DropBlock on conv blocks 3 & 4 only (leaving early layers alone atm)
-            db = DropBlock(block_size=dropblock_size, drop_prob=dropblock_prob) \
-                if dropblock_size > 0 else None
-
-            self.encoder = nn.Sequential(
-                ConvBlock(in_channels, hidden_dim),
-                ConvBlock(hidden_dim, hidden_dim),
-                ConvBlock(hidden_dim, hidden_dim, drop_block=db),
-                ConvBlock(hidden_dim, hidden_dim, drop_block=db),
-            )
+                self.encoder = nn.Sequential(
+                    ConvBlock(in_channels, hidden_dim),   # 42x42 ← safe
+                    ConvBlock(hidden_dim, hidden_dim),    # 21x21 ← safe
+                    ConvBlock(hidden_dim, hidden_dim, drop_block=db),                   # 10x10
+                    ConvBlock(hidden_dim, hidden_dim, drop_block=db),                   #  5x5
+                )
+                self.embed_dim=None
+                
     def forward(self, x):
         x = self.encoder(x)
         return x.view(x.size(0), -1)
 
-'''
-class PrototypicalNetwork(nn.Module):
-    """
-    Full Prototypical Network.
-
-    Given a support set and query set, computes class prototypes as the mean
-    of embedded support examples, then returns distances from queries
-    to prototypes. 
-
-    Args:
-        in_channels: Number of input channels (1 for Omniglot, 3 for miniImageNet)
-        hidden_dim: Number of filters per conv block (default 64)
-        distance: Distance function
-        embed_dim: Required for mahalanobis (64 for Omniglot, 1600 for miniImageNet)
-    """
-
-    def __init__(self, in_channels=1, hidden_dim=64, distance='euclidean',
-                 embed_dim=None, dropblock_size=0, dropblock_prob=0.1):
-        super().__init__()
-        self.encoder = ProtoNetEncoder(
-            in_channels, hidden_dim,
-            dropblock_size=dropblock_size,
-            dropblock_prob=dropblock_prob
-        )
-'''
-        
-## responded to Thao's comments           
+         
 def forward(self, x):
         """
         Args: x: Images of shape (B, C, H, W)
