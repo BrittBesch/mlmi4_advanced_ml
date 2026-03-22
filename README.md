@@ -92,10 +92,18 @@ The typical workflow could be:
 
    This uses only the 312-dim CUB attribute vectors as auxiliary class features and saves the best checkpoint to `experiments/checkpoints/cub_zeroshot_precomputed_attributes_euclidean_best.pt` by default.
 
-### Omniglot Few-shot Experiment (Thao)
+### Omniglot Few-shot Experiment
 1. From the **project root** `mlmi4_advanced_ml` run:
 
    ```bash
    PYTHONPATH=. python src/training/train_fewshot.py configs/omniglot_config.yaml
 2. The Omniglot dataset will be automatically downloaded to `data/omniglot` via `torchvision` upon the first run.
 3. Best model is saved to `results/omniglot_baseline/best_model.pt`; final test accuracy is the few-shot result to report.
+
+### Speech Commands Keyword Spotting Few-shot Experiment
+1. From the **project root** `mlmi4_advanced_ml` run:
+
+   ```bash
+   PYTHONPATH=. python src/training/train_fewshot_speech.py configs/speech_config.yaml
+2. The Speech Commands v0.02 dataset will be automatically downloaded to `data/speech` via `torchaudio` upon the first run.
+3. Best model is saved to `results/speech_baseline/best_model.pt`; final test accuracy is the few-shot result to report.

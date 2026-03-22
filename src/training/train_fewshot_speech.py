@@ -1,11 +1,5 @@
 """
-Training script for Prototypical Networks - Few-shot Learning
-
-Paper hyperparameters:
-  - Optimizer: Adam, lr=1e-3, halved every 2000 episodes
-  - No regularization other than batch normalization
-  - miniImageNet: 30-way (1-shot) or 20-way (5-shot), 15 queries/class
-  - Omniglot: 60-way, 5 queries/class, match train/test shot
+Training script for Prototypical Networks - Few-shot KWS Learning
 
 """
 
@@ -28,8 +22,12 @@ if PROJECT_ROOT not in sys.path:
 from model import ProtoNetEncoder  #from jack's model.py
 from loss import prototypical_loss, build_distance  #name matching with britt's loss.py code
 
-from src.data_loader.dataloader_miniImageNet import get_dataloader as get_miniimagenet_loader
-from src.data_loader.dataloader_omniglot import get_dataloader as get_omniglot_loader
+# Import the Speech dataloader
+from src.data_loader.dataloader_speech import get_dataloader as get_speech_loader
+
+# Import both Speech architectures
+from model_speech import SpeechC64, TCResNet8
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")  # NEW
@@ -114,16 +112,8 @@ def train(config):      #### will introduce configs with YAML to match britt and
     dataset_name = data_config.get('dataset', 'miniimagenet')
 
     # ---- 1. Data Setup ----
-    if dataset_name == 'miniimagenet':
-        train_loader = get_miniimagenet_loader(data_config, split='train')
-        val_loader = get_miniimagenet_loader(data_config, split='val')
-        in_channels = 3
-    elif dataset_name == 'omniglot':
-        train_loader = get_omniglot_loader(data_config, split='train')
-        val_loader = get_omniglot_loader(data_config, split='val')
-        in_channels = 1
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+    train_loader = get_speech_loader(data_config, split='train')
+    val_loader = get_speech_loader(data_config, split='val')
 
     train_n_shot = data_config['train_params']['n_shot']
     val_n_shot = data_config.get('val_params', data_config['test_params'])['n_shot']
@@ -131,20 +121,24 @@ def train(config):      #### will introduce configs with YAML to match britt and
     n_episodes = data_config['train_params']['n_episodes']
 
     # ---- 2. Model Setup ----
-    # embed_dim depends on input size: 64 for 28x28 (Omniglot), 1600 for 84x84 (miniImageNet)
-    embed_dim = 64 if dataset_name == 'omniglot' else 1600
+    # Both speech models output a 64-dimensional embedding
+    embed_dim = 64
 
     # Extract model parameters from config
     model_config = config.get('model_params', {})
-    hidden_dim = model_config.get('hidden_dim', 64)
-    dropblock_size = model_config.get('dropblock_size', 0)
-    dropblock_prob = model_config.get('dropblock_prob', 0.1)
+    model_type = model_config.get('model_type', 'c64')
 
-    model = ProtoNetEncoder(
-        in_channels=in_channels,
-        hidden_dim=hidden_dim,
-        dropblock_size=dropblock_size,
-        dropblock_prob=dropblock_prob
+    if model_type == 'tc_resnet8':
+        print("--> Initializing TC-ResNet-8")
+        embed_dim = 64
+        model = TCResNet8(embedding_dim=embed_dim).to(device)
+    else:
+        print("--> Initializing Baseline SpeechC64")
+        embed_dim = 384  # <flattened C64 output
+        model = SpeechC64(
+            hidden_dim=model_config.get('hidden_dim', 64),
+            dropblock_size=model_config.get('dropblock_size', 0),
+            dropblock_prob=model_config.get('dropblock_prob', 0.1)
         ).to(device)
 
     # ---- 3. Distance Setup ----
@@ -224,10 +218,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
     model.load_state_dict(checkpoint['model_state_dict'])
 
     # Test dataset
-    if dataset_name == 'miniimagenet':
-        test_loader = get_miniimagenet_loader(data_config, split='test')
-    elif dataset_name == 'omniglot':
-        test_loader = get_omniglot_loader(data_config, split='test')
+    test_loader = get_speech_loader(data_config, split='test')
 
     test_acc, test_loss, test_ci = evaluate(
         model, test_loader, test_n_shot, distance_fn, device
@@ -235,8 +226,8 @@ def train(config):      #### will introduce configs with YAML to match britt and
     print(f"Test Accuracy: {test_acc*100:.2f}% ± {test_ci*100:.2f}% ")
 
 if __name__ == '__main__':
-
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/miniimagenet_config.yaml"
+    # Default to the speech config
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/speech_config.yaml"
 
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
