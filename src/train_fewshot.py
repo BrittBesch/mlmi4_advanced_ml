@@ -9,8 +9,8 @@ Paper hyperparameters:
 
 """
 
+
 import os
-import pickle
 import random
 import yaml
 import sys
@@ -20,19 +20,15 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
 # ---- Team module imports and dependencies ----
 from model import ProtoNetEncoder  #from jack's model.py
 from loss import prototypical_loss, build_distance  #name matching with britt's loss.py code
 
-from src.data_loader.dataloader_miniImageNet import get_dataloader as get_miniimagenet_loader
-from src.data_loader.dataloader_omniglot import get_dataloader as get_omniglot_loader
+from dataloader_miniImageNet import get_dataloader as get_miniimagenet_loader
+from dataloader_omniglot import get_dataloader as get_omniglot_loader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")  # NEW
+
 
 def train_episode(model, x, y, n_support, optimizer, distance_fn):
     """
@@ -88,7 +84,6 @@ def evaluate(model, val_loader, n_support, distance_fn, device):
         for batch in val_loader:
             x, y = batch
             x = x.to(device)
-            y = y.to(device)
 
             embeddings = model(x)
             loss, acc = prototypical_loss(
@@ -133,7 +128,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
 
     # ---- 2. Model Setup ----
     # embed_dim depends on input size: 64 for 28x28 (Omniglot), 1600 for 84x84 (miniImageNet)
-
+    embed_dim = 64 if dataset_name == 'omniglot' else 1600
 
     # Extract model parameters from config
     model_config = config.get('model_params', {})
@@ -143,28 +138,20 @@ def train(config):      #### will introduce configs with YAML to match britt and
 
     model = ProtoNetEncoder(
         in_channels=in_channels,
-        **model_config                                                                                                                             ######## CHANGED HERE TOO 
+        hidden_dim=hidden_dim,
+        dropblock_size=dropblock_size,
+        dropblock_prob=dropblock_prob
         ).to(device)
-    
-    embed_dim = model.embed_dim if model.embed_dim else (64 if dataset_name == 'omniglot' else 1600)
+
+    # ---- 3. Distance Setup ----
     distance_fn = build_distance(config, z_dim=embed_dim, device=device)
 
     lr = config.get('lr', 1e-3)
-    # ---- 3. Optimizer Setup ----
-    # Include learnable distance parameters if using diagonal or lowrank metric
-    if hasattr(distance_fn, 'parameters'):
-        optimizer = optim.Adam(
-            list(model.parameters()) + list(distance_fn.parameters()),
-            lr=lr
-        )
-    else:
-        optimizer = optim.Adam(model.parameters(), lr=lr)
-        
+    optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=config.get('lr_step', 2000), gamma=0.5)
     
     # ---- Training loop ----
-    best_val_acc = float('-inf')
-    saved_best = False
+    best_val_acc = 0.0
     train_losses = []
     train_accs = []
     log_interval = config.get('log_interval', 100)
@@ -174,7 +161,6 @@ def train(config):      #### will introduce configs with YAML to match britt and
     for episode, batch in enumerate(train_loader, 1):
         x, y = batch
         x = x.to(device)
-        y = y.to(device)
 
         # Reshape batch into support/query split
         # Sampler gives us (n_way, n_shot + n_query) samples grouped by class
@@ -201,7 +187,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         # ---- Validation ----
         if episode % val_interval == 0:
             val_acc, val_loss, val_ci = evaluate(
-                            model, val_loader, val_n_shot, distance_fn, device
+                            model, val_loader, val_n_shot, device, distance_fn
                         )
             print(
                 f"  --> Validation | "
@@ -214,28 +200,17 @@ def train(config):      #### will introduce configs with YAML to match britt and
                 best_val_acc = val_acc
                 save_path = os.path.join(output_dir, 'best_model.pt')
                 torch.save({
-                    'episode': int(episode),
+                    'episode': episode,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'val_acc': float(val_acc)
+                    'val_acc': val_acc
                 }, save_path)
-                saved_best = True
                 print(f"  --> New best model saved (acc={val_acc*100:.2f}%)")
 
     # ---- Final test evaluation (1000 episodes, as in paper) ----
     print("\n" + "=" * 60)
     print("Final evaluation (1000 episodes):")
     print("=" * 60)
-
-    checkpoint_path = os.path.join(output_dir, 'best_model.pt')
-    if not os.path.exists(checkpoint_path):
-        print("No valid best checkpoint found during validation; saving final model as fallback.")
-        torch.save({
-            'episode': int(n_episodes),
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'val_acc': float('nan')
-        }, checkpoint_path)
 
     # Load best model
     checkpoint = torch.load(
@@ -251,7 +226,7 @@ def train(config):      #### will introduce configs with YAML to match britt and
         test_loader = get_omniglot_loader(data_config, split='test')
 
     test_acc, test_loss, test_ci = evaluate(
-        model, test_loader, test_n_shot, distance_fn, device
+        model, test_loader, test_n_shot, device, distance_fn
         )
     print(f"Test Accuracy: {test_acc*100:.2f}% ± {test_ci*100:.2f}% ")
 
@@ -276,15 +251,5 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    # Create a unique timestamped folder
-    base_dir = config.get('output_dir', 'results')
-    dataset = config['data'].get('dataset', 'unknown')
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Creates e.g., results/omniglot_baseline/omniglot_20260310_101129
-    unique_run_dir = os.path.join(base_dir, f"{dataset}_{timestamp}")
-    os.makedirs(unique_run_dir, exist_ok=True)
-    
-    config['output_dir'] = unique_run_dir
-    
+    os.makedirs(config.get('output_dir', 'results'), exist_ok=True)
     train(config)
