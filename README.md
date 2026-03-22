@@ -60,7 +60,7 @@ Configs live under `configs/`. Each config controls:
 
 ## Running baseline replications
 
-### Omniglot few-shot (Table 4 replication)
+### Omniglot few-shot (Table 1 replication)
 
 1. From the **project root** run:
 
