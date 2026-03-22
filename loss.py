@@ -148,17 +148,7 @@ class PrototypicalLoss(nn.Module):
 #
 # Mahalanobis distance replaces the identity with a learned PSD matrix M:
 #     d²(x, y) = (x-y)ᵀ M (x-y),  M = LᵀL ≥ 0
-#
-# For zero-shot learning this is especially useful: prototypes are built
-# from *attribute* vectors, not visual examples, so the natural geometry
-# of the embedding space may not align with Euclidean distance. Letting
-# the model learn a better metric directly compensates for that gap.
-#
-# Experiments
-# -----------
-#   Experiment 1 (baseline)  : --distance euclidean  → standard Euclidean (0 extra params)
-#   Experiment 2 (EXTENSION) : --distance diagonal   → diagonal M        (d extra params)
-#   Experiment 3 (EXTENSION) : --distance lowrank    → low-rank M        (d×r extra params)
+
 
 
 def build_distance(config: dict, z_dim: int, device: torch.device):
@@ -188,7 +178,7 @@ def build_distance(config: dict, z_dim: int, device: torch.device):
 
 class DiagonalMahalanobisDistance(nn.Module):
     """
-    EXTENSION – Experiment 2: Diagonal Mahalanobis distance.
+    EXTENSION – Experiment: Diagonal Mahalanobis distance.
 
     M = diag(s²),  so  d²(x, y) = Σᵢ sᵢ² (xᵢ - yᵢ)²  =  ||s ⊙ (x-y)||²
 
@@ -227,7 +217,7 @@ class DiagonalMahalanobisDistance(nn.Module):
 
 class LowRankMahalanobisDistance(nn.Module):
     """
-    EXTENSION – Experiment 3: Low-rank Mahalanobis distance.
+    EXTENSION – Experiment: Low-rank Mahalanobis distance.
 
     M = LᵀL where L has shape (rank, dim), so:
         d²(x, y) = (x-y)ᵀ LᵀL (x-y)  =  ||L(x-y)||²
