@@ -1,13 +1,7 @@
 #!/bin/bash
 #
-# SLURM batch script for CUB-200-2011 zero-shot experiment (Table 3 replication)
-# Follows the conventions described in README.md:
-#   - Uses configs/cub_config.yaml
-#   - Saves checkpoints to experiments/checkpoints
-#   - Saves results / metrics to experiments/results
-#   - Uses experiments/logs for SLURM/stdout logs
-#
-# Edit the lines marked TODO to match your cluster (partition, account, modules, conda env).
+# SLURM batch script for CUB zero-shot experiment with precomputed features (Table 3 replication)
+# Uses configs/cub_config.yaml (precomputed GoogLeNet features + attributes)
 
 # ===== SLURM RESOURCES =====
 #SBATCH --job-name=cub-zeroshot

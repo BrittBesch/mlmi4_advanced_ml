@@ -1,24 +1,25 @@
-# CUB-200-2011 zero-shot experiment (Table 3 replication)
+# CUB zero-shot with precomputed features (Table 3 replication)
+# Uses data/cvpr2016_cub/ — precomputed GoogLeNet image features + attribute class aux
 
 data:
-  data_dir: "data/CUB_200_2011"
-  image_size: 224
-  batch_size: 32
-  num_workers: 0
+  data_root: "data/cvpr2016_cub"
+  cub_root: "data/CUB_200_2011"   # paper: 312-dim CUB continuous attributes
 
 model:
   z_dim: 1024
-  attr_dim: 312
 
 training:
   epochs: 100
   lr: 0.0001
+  n_way: 50          # episode n-way (paper: 50)
+  n_query: 10        # queries per class per episode (paper: 10)
+  n_episodes: 100    # episodes per epoch
+  val_episodes: 20
   early_stopping:
-    patience: 5
-    min_delta: 0.01
+    patience: 10
+    min_delta: 0.0
 
 experiment:
   seed: 42
   save_dir: "experiments/checkpoints"
-  exp_name: "cub_zeroshot"
-  results_dir: "experiments/results"
+  exp_name: "cub_zeroshot_precomputed"
