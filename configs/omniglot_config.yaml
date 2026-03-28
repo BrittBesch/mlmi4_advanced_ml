@@ -1,36 +1,37 @@
 data:
+  dataset: "omniglot"
   data_dir: "./data/omniglot"
   num_workers: 4
   
   train_params:
-    n_episodes: 100    
-    n_way: 60          # Train Way
-    n_shot: 5          # Train Shot
-    n_query: 5
+    n_episodes: 10000  # Train for a long time to let the LR scheduler work
+    n_way: 60          # 60-way training per Table 4
+    n_shot: 5          # 1-shot training per Table 4
+    n_query: 5         # 5 queries per class during training
     
   val_params:
-    n_episodes: 100
-    n_way: 5           # Val Way (Match test for accurate early stopping)
-    n_shot: 1          # Val Shot
-    n_query: 15
+    n_episodes: 500
+    n_way: 5           # Match test way for accurate early stopping
+    n_shot: 5          
+    n_query: 15        # Standard evaluation query size
     
   test_params:
-    n_episodes: 1000
-    n_way: 5           # Test Way (Benchmark)
-    n_shot: 1          # Test Shot (Benchmark)
-    n_query: 15        # Paper uses 15 queries for testing
+    n_episodes: 1000   # 1000 episodes per the paper
+    n_way: 5           # 5-way testing benchmark
+    n_shot: 5          # 1-shot testing benchmark
+    n_query: 15        
 
 model_params:
   hidden_dim: 64
-  dropblock_size: 0         # Change to 5 for extension
+  dropblock_size: 0         # 0 = baseline, 5 = extension
   dropblock_prob: 0.1
 
-distance: "euclidean"       # Toggle between: euclidean, diagonal, lowrank
+distance: "euclidean"       
 
 # ---- Training & Logging Hyperparameters ----
 lr: 0.001
-lr_step: 2000
-log_interval: 10            # Lowered since we are running 100 episodes
-val_interval: 100           # Lowered to validate at the end of the 100 episodes
+lr_step: 2000               # Halve LR every 2000 episodes per the paper
+log_interval: 100           
+val_interval: 2000          # Validate right before the LR steps down
 output_dir: "./results/omniglot_baseline"
 seed: 42

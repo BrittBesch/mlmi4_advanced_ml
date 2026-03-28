@@ -5,8 +5,8 @@ Implements the data loading for Snell et al. (2017) Table 3 zero-shot CUB:
   - Image features: precomputed 1024-dim GoogLeNet features (.t7 files)
       10 crops per image: middle, upper-left, upper-right, lower-left, lower-right
       of the original image and its horizontal flip (crop index 0 = middle original).
-      Train: average all 10 crops → (n_imgs, 1024).
-      Test:  middle crop only   → (n_imgs, 1024)  [paper: "middle crop of original"]
+      Train: one random crop per __getitem__ (uniform over the 10); stored arrays are (n_imgs, 1024, 10).
+      Val/test (test_time=True): middle crop only — paper: "middle crop of original".
   - Auxiliary class features: 312-dim continuous CUB attributes (paper) loaded
       from CUB_200_2011/attributes/class_attribute_labels_continuous.txt.
   - Class splits from the provided split text files (100/50/50 train/val/test)

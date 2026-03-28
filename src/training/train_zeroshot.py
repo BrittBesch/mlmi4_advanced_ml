@@ -9,7 +9,7 @@ Architecture (paper):
   g: linear(312  → z_dim)   class attribute encoder; prototypes L2-normalised
 
 Image features: data/cvpr2016_cub/images/*.t7  (precomputed GoogLeNet, Reed et al. 2016)
-  Train: average of all 10 crops per image
+  Train: one random crop sampled per image per access
   Test:  middle crop of original image only (paper: "At test time we use only the middle crop")
 
 Attributes: data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt
@@ -342,7 +342,7 @@ def main():
 
     cub_root = args.cub_root
 
-    # Train: average all 10 crops. Val/test: middle crop only (paper).
+    # Train: random crop per __getitem__ (see CUBPrecomputedDataset). Val/test: middle crop only (paper).
     train_ds = CUBPrecomputedDataset(
         args.data_root, split="train",
         cub_root=cub_root, test_time=False,
