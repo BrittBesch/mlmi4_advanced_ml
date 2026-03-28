@@ -45,8 +45,8 @@ from loss import (
     euclidean_dist,
     build_distance,
 )
-from src.data_loader.dataloader_cub_precomputed import (
-    CUBPrecomputedDataset, AUX_DIMS, IMAGE_DIM,
+from src.data_loader.dataloader_cub import (
+    CUBPrecomputedDataset, IMAGE_DIM,
 )
 from src.utils.device import get_device
 from src.utils.seed import set_seed
@@ -182,7 +182,73 @@ def evaluate(
     dists = distance_fn(z, prototypes)   # (N, n_test_classes)
     pred = dists.argmin(1).cpu()
     acc = (pred == all_labels).float().mean().item()
+    
+    
     return acc
+
+
+@torch.no_grad()
+def evaluate_episodic(
+    model_img,
+    model_aux,
+    aux_features_test: np.ndarray,
+    dataset: CUBPrecomputedDataset,
+    device: torch.device,
+    distance_fn,
+    n_episodes: int,
+    n_way: int,
+    n_query: int,
+) -> tuple[float, float]:
+    """
+    Episodic zero-shot evaluation with a 95% confidence interval.
+
+    Treats each randomly sampled test episode as one sample, computes the
+    mean episode accuracy and a 95% CI over episodes using:
+        CI = 1.96 * std(accs) / sqrt(len(accs))
+    """
+    model_img.eval()
+    model_aux.eval()
+    if isinstance(distance_fn, nn.Module):
+        distance_fn.eval()
+
+    aux_tensor = torch.tensor(aux_features_test, dtype=torch.float32, device=device)
+
+    # Build per-class index lists once (on the fixed test split)
+    indices_per_class: dict = defaultdict(list)
+    for idx in range(len(dataset)):
+        indices_per_class[int(dataset.labels[idx])].append(idx)
+    all_classes = [c for c in indices_per_class if len(indices_per_class[c]) > 0]
+
+    accs = []
+
+    for _ in range(n_episodes):
+        n_avail = len(all_classes)
+        this_way = min(n_way, n_avail)
+        episode_classes = random.sample(all_classes, this_way)
+
+        # Sample query indices and local labels for this episode
+        episode_indices, episode_labels = [], []
+        for local_idx, c in enumerate(episode_classes):
+            pool = indices_per_class[c]
+            chosen = random.sample(pool, n_query) if len(pool) >= n_query \
+                else [random.choice(pool) for _ in range(n_query)]
+            episode_indices.extend(chosen)
+            episode_labels.extend([local_idx] * n_query)
+
+        feats = torch.stack([dataset[i][0] for i in episode_indices]).to(device)
+        labels = torch.tensor(episode_labels, dtype=torch.long, device=device)
+        cls_idx = torch.tensor(episode_classes, dtype=torch.long, device=device)
+
+        prototypes = _l2_normalize(model_aux(aux_tensor[cls_idx]))
+        z = model_img(feats)
+        _, acc = prototypical_loss_from_prototypes(z, prototypes, labels, distance_fn)
+
+        accs.append(acc.item())
+
+    mean_acc = float(np.mean(accs))
+    # 95% CI radius assuming approximate normality of episode accuracies
+    ci95 = 1.96 * float(np.std(accs, ddof=1)) / np.sqrt(len(accs))
+    return mean_acc, ci95
 
 
 def build_models(aux_dim: int, z_dim: int, device: torch.device, dist_cfg: dict):
@@ -214,14 +280,10 @@ def main():
         description="Zero-shot CUB with precomputed features (Table 3)"
     )
     parser.add_argument("--config", type=str, default="",
-                        help="Path to cub_precomputed_config.yaml (optional)")
+                        help="Path to cub_config.yaml (optional)")
     parser.add_argument("--data_root", type=str, default="data/cvpr2016_cub")
     parser.add_argument("--cub_root", type=str, default="data/CUB_200_2011",
-                        help="Path to CUB_200_2011 (required for aux_type=attributes)")
-    parser.add_argument("--aux_type", type=str, default="attributes",
-                        choices=["attributes", "w2v", "bow"],
-                        help="Auxiliary modality: 'attributes' (312-dim, paper), "
-                             "'w2v' (400-dim), or 'bow' (5726-dim)")
+                        help="Path to CUB_200_2011 (attributes only)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--z_dim", type=int, default=1024)
@@ -234,6 +296,8 @@ def main():
                         help="Training episodes per epoch (not specified in paper)")
     parser.add_argument("--val_episodes", type=int, default=20,
                         help="Validation episodes per epoch (not specified in paper)")
+    parser.add_argument("--test_episodes", type=int, default=1000,
+                        help="Number of test episodes for episodic CI evaluation")
     parser.add_argument("--early_stopping_patience", type=int, default=10)
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0)
     parser.add_argument("--save_dir", type=str, default="experiments/checkpoints")
@@ -244,14 +308,13 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config or os.path.join(PROJECT_ROOT, "configs",
-                                                   "cub_precomputed_config.yaml"))
+                                                   "cub_config.yaml"))
     if cfg:
         d = cfg.get("data", {})
         t = cfg.get("training", {})
         e = cfg.get("experiment", {})
         args.data_root = d.get("data_root", args.data_root)
         args.cub_root = d.get("cub_root", args.cub_root)
-        args.aux_type = d.get("aux_type", args.aux_type)
         args.epochs = t.get("epochs", args.epochs)
         args.lr = t.get("lr", args.lr)
         args.n_way = t.get("n_way", args.n_way)
@@ -270,26 +333,26 @@ def main():
     set_seed(args.seed)
     device = get_device()
 
-    aux_dim = AUX_DIMS[args.aux_type]
+    aux_dim = 312
     dist_cfg = {"distance": args.distance, "lowrank_r": args.lowrank_r}
 
     print(f"Loading CUB precomputed features from {args.data_root}")
-    print(f"Auxiliary modality: {args.aux_type} ({aux_dim}-dim)")
+    print(f"Auxiliary modality: attributes ({aux_dim}-dim)")
     print(f"Distance metric: {args.distance}")
 
-    cub_root = args.cub_root if args.aux_type == "attributes" else None
+    cub_root = args.cub_root
 
-    # Train: average all 10 crops. Val/test: middle crop only (paper).
+    # Train: random crop per __getitem__ (see CUBPrecomputedDataset). Val/test: middle crop only (paper).
     train_ds = CUBPrecomputedDataset(
-        args.data_root, split="train", aux_type=args.aux_type,
+        args.data_root, split="train",
         cub_root=cub_root, test_time=False,
     )
     val_ds = CUBPrecomputedDataset(
-        args.data_root, split="val", aux_type=args.aux_type,
+        args.data_root, split="val",
         cub_root=cub_root, test_time=True,
     )
     test_ds = CUBPrecomputedDataset(
-        args.data_root, split="test", aux_type=args.aux_type,
+        args.data_root, split="test",
         cub_root=cub_root, test_time=True,
     )
 
@@ -346,7 +409,7 @@ def main():
     # Phase 2: retrain on train+val for best_epoch epochs, evaluate on test
     print(f"\nPhase 2: retraining on train+val for {best_epoch} epoch(s)...")
     trainval_ds = CUBPrecomputedDataset(
-        args.data_root, split="trainval", aux_type=args.aux_type,
+        args.data_root, split="trainval",
         cub_root=cub_root, test_time=False,
     )
     print(f"Train+val: {len(trainval_ds.class_names)} classes, {len(trainval_ds)} images")
@@ -364,26 +427,40 @@ def main():
         )
         print(f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f}  acc={train_acc:.4f}")
 
-    test_acc = evaluate(model_img, model_aux, test_ds.aux_features, test_ds, device, distance_fn)
-    print(f"\nFinal zero-shot test accuracy ({len(test_ds.class_names)}-way): {test_acc:.4f}")
+    test_mean, test_ci = evaluate_episodic(
+        model_img,
+        model_aux,
+        test_ds.aux_features,
+        test_ds,
+        device,
+        distance_fn,
+        n_episodes=args.test_episodes,
+        n_way=len(test_ds.class_names),
+        n_query=args.n_query,
+    )
+    print(
+        f"\nFinal zero-shot test accuracy ({len(test_ds.class_names)}-way): "
+        f"{test_mean:.4f} ± {test_ci:.4f} (95% CI over {args.test_episodes} episodes)"
+    )
 
     # Save checkpoint
     os.makedirs(args.save_dir, exist_ok=True)
     ckpt = {
         "best_epoch": best_epoch,
-        "aux_type": args.aux_type,
+        "aux_type": "attributes",
         "distance": args.distance,
         "z_dim": args.z_dim,
         "img_encoder": model_img.state_dict(),
         "aux_encoder": model_aux.state_dict(),
-        "test_acc": test_acc,
+        "test_acc": test_mean,
+        "test_ci95": test_ci,
     }
     if isinstance(distance_fn, nn.Module):
         ckpt["distance_fn"] = distance_fn.state_dict()
 
     path = os.path.join(
         args.save_dir,
-        f"{args.exp_name}_{args.aux_type}_{args.distance}_best.pt"
+        f"{args.exp_name}_attributes_{args.distance}_best.pt"
     )
     torch.save(ckpt, path)
     print(f"Checkpoint saved to {path}")
