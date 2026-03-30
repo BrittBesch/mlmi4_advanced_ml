@@ -20,7 +20,7 @@ Training (two-phase as in paper):
   Phase 2: retrain on train+val for best_epoch epochs; evaluate on test
 
 Usage:
-  python src/training/train_zeroshot_precomputed.py \
+  python src/training/train_zeroshot.py \
       --data_root data/cvpr2016_cub \
       --cub_root data/CUB_200_2011
 """
