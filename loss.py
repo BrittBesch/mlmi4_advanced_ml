@@ -1,10 +1,4 @@
-"""
-Prototypical Networks loss (Snell et al., 2017).
-
-Implements J(phi): negative log-probability of the correct class when
-using Euclidean distance to class prototypes. Extensible for Mahalanobis
-distance (extension: distance metric limitation).
-"""
+"""Prototypical losses and distance metrics for few-shot learning."""
 
 from typing import Tuple
 
@@ -54,8 +48,7 @@ def prototypical_loss(
         acc: scalar accuracy on query set
     """
     device = embeddings.device
-    labels_cpu = labels.cpu()
-    embeddings_cpu = embeddings.cpu()
+    labels_cpu = labels.detach().cpu()
 
     classes = torch.unique(labels_cpu, sorted=True)
     n_classes = len(classes)
@@ -64,7 +57,9 @@ def prototypical_loss(
         return labels_cpu.eq(c).nonzero(as_tuple=True)[0][:n_support]
 
     support_idxs_list = [support_idxs(c) for c in classes]
-    prototypes = torch.stack([embeddings_cpu[idxs].mean(0) for idxs in support_idxs_list])
+    prototypes = torch.stack(
+        [embeddings.index_select(0, idxs.to(device)).mean(0) for idxs in support_idxs_list]
+    )
 
     n_query = labels_cpu.eq(classes[0].item()).sum().item() - n_support
     query_idxs = torch.stack(
@@ -72,8 +67,7 @@ def prototypical_loss(
     ).view(-1)
 
     query_emb = embeddings.index_select(0, query_idxs.to(device))
-    prototypes_dev = prototypes.to(device)
-    dists = distance_fn(query_emb, prototypes_dev)
+    dists = distance_fn(query_emb, prototypes)
 
     log_p_y = F.log_softmax(-dists, dim=1)
     log_p_y = log_p_y.view(n_classes, n_query, -1)

@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -40,7 +41,7 @@ from src.data_loader.dataloader_cub import CUBPrecomputedDataset, IMAGE_DIM
 from src.utils.device import get_device
 from src.utils.seed import set_seed
 
-DistanceFn = nn.Module | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+DistanceFn = Union[nn.Module, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]]
 
 _Z_SCORE_95 = 1.96
 
@@ -75,8 +76,8 @@ class TrainConfig:
 
     @classmethod
     def from_args_and_yaml(
-        cls, args: argparse.Namespace, yaml_path: Path | str,
-    ) -> TrainConfig:
+        cls, args: argparse.Namespace, yaml_path: Union[Path, str],
+    ) -> "TrainConfig":
         """Build training config from CLI args overlaid with YAML values."""
         cfg = _load_yaml(yaml_path)
         d = cfg.get("data", {})
@@ -110,9 +111,9 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class ModelCheckpoint:
-    img_encoder: dict[str, torch.Tensor]
-    aux_encoder: dict[str, torch.Tensor]
-    distance_fn: dict[str, torch.Tensor] | None = None
+    img_encoder: Dict[str, torch.Tensor]
+    aux_encoder: Dict[str, torch.Tensor]
+    distance_fn: Optional[Dict[str, torch.Tensor]] = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +150,7 @@ def _l2_normalize(x: torch.Tensor, dim: int = 1, eps: float = 1e-8) -> torch.Ten
     return x / (x.norm(p=2, dim=dim, keepdim=True) + eps)
 
 
-def _load_yaml(path: Path | str) -> dict:
+def _load_yaml(path: Union[Path, str]) -> dict:
     """Load YAML from disk, returning an empty dict if missing."""
     path = Path(path)
     if not path.is_file():
@@ -158,17 +159,17 @@ def _load_yaml(path: Path | str) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def _build_class_index(dataset: CUBPrecomputedDataset) -> dict[int, list[int]]:
+def _build_class_index(dataset: CUBPrecomputedDataset) -> Dict[int, List[int]]:
     """Map class id to dataset indices belonging to that class."""
-    index: dict[int, list[int]] = defaultdict(list)
+    index: Dict[int, List[int]] = defaultdict(list)
     for idx in range(len(dataset)):
         index[int(dataset.labels[idx])].append(idx)
     return {c: idxs for c, idxs in index.items() if idxs}
 
 
 def _sample_episode(
-    all_classes: list[int],
-    indices_per_class: dict[int, list[int]],
+    all_classes: List[int],
+    indices_per_class: Dict[int, List[int]],
     dataset: CUBPrecomputedDataset,
     n_way: int,
     n_query: int,
@@ -180,8 +181,8 @@ def _sample_episode(
     this_way = min(n_way, len(all_classes))
     episode_classes = random.sample(all_classes, this_way)
 
-    episode_indices: list[int] = []
-    episode_labels: list[int] = []
+    episode_indices: List[int] = []
+    episode_labels: List[int] = []
     for local_idx, c in enumerate(episode_classes):
         pool = indices_per_class[c]
         chosen = (
@@ -199,7 +200,7 @@ def _sample_episode(
     )
 
 
-def _snapshot_state(model: nn.Module) -> dict[str, torch.Tensor]:
+def _snapshot_state(model: nn.Module) -> Dict[str, torch.Tensor]:
     """Clone a model state dict for safe checkpointing."""
     return {k: v.clone() for k, v in model.state_dict().items()}
 
@@ -288,7 +289,7 @@ def evaluate_episodic(
     n_episodes: int,
     n_way: int,
     n_query: int,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """Returns (mean_accuracy, 95% CI radius) over episodes."""
     model_img.eval()
     model_aux.eval()
@@ -299,7 +300,7 @@ def evaluate_episodic(
     indices_per_class = _build_class_index(dataset)
     all_classes = list(indices_per_class.keys())
 
-    accs: list[float] = []
+    accs: List[float] = []
 
     for _ in range(n_episodes):
         ep = _sample_episode(all_classes, indices_per_class, dataset, n_way, n_query, device)
@@ -323,6 +324,7 @@ def build_models(
     distance: DistanceType,
     lowrank_r: int,
 ) -> tuple[nn.Module, nn.Module, DistanceFn]:
+) -> Tuple[nn.Module, nn.Module, DistanceFn]:
     """Construct encoders and configured distance function on device."""
     model_img = LinearImageEncoder(in_dim=IMAGE_DIM, z_dim=z_dim).to(device)
     model_aux = LinearAuxEncoder(aux_dim=aux_dim, z_dim=z_dim).to(device)

@@ -18,9 +18,8 @@ Data directory: data/cvpr2016_cub/
 Attributes (paper): data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt
 """
 
-from __future__ import annotations
-
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -37,7 +36,7 @@ MIDDLE_CROP_IDX = 0
 IMAGE_DIM = 1024
 
 
-def _load_split_names(split_file: Path) -> list[str]:
+def _load_split_names(split_file: Path) -> List[str]:
     """Return list of class folder names (e.g. '001.Black_footed_Albatross') from a split file."""
     if not split_file.exists():
         raise FileNotFoundError(f"Split file not found: {split_file}")
@@ -61,7 +60,7 @@ def _load_class_image_features(class_file: Path) -> np.ndarray:
     return np.array(torchfile.load(str(class_file)), dtype=np.float32)  # (n_imgs, 1024, 10)
 
 
-def load_cub_attributes(cub_root: str, class_names: list[str]) -> np.ndarray:
+def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
     """
     Load 312-dim continuous CUB attributes for the given classes (paper aux modality).
 
@@ -106,8 +105,8 @@ def load_cub_attributes(cub_root: str, class_names: list[str]) -> np.ndarray:
 def load_split_data(
     data_root: str,
     split: str,
-    cub_root: str | None = None,
-) -> tuple[list[np.ndarray], np.ndarray, list[str]]:
+    cub_root: Optional[str] = None,
+) -> Tuple[List[np.ndarray], np.ndarray, List[str]]:
     """
     Load all image features and class-level auxiliary features for a split.
 
@@ -167,7 +166,7 @@ class CUBPrecomputedDataset(Dataset):
         self,
         data_root: str,
         split: str,
-        cub_root: str | None = None,
+        cub_root: Optional[str] = None,
         test_time: bool = False,
     ) -> None:
         """
@@ -196,7 +195,7 @@ class CUBPrecomputedDataset(Dataset):
     def __len__(self) -> int:
         return len(self.labels)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         crops = self.features[idx]   # (1024, 10)
         if self.test_time:
             feat = crops[:, MIDDLE_CROP_IDX]
