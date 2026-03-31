@@ -20,7 +20,7 @@ Training (two-phase as in paper):
   Phase 2: retrain on train+val for best_epoch epochs; evaluate on test
 
 Usage:
-  python src/training/train_zeroshot_precomputed.py \
+  python src/training/train_zeroshot.py \
       --data_root data/cvpr2016_cub \
       --cub_root data/CUB_200_2011
 """
@@ -305,6 +305,9 @@ def main():
     parser.add_argument("--distance", type=str, default="euclidean",
                         choices=["euclidean", "diagonal", "lowrank"])
     parser.add_argument("--lowrank_r", type=int, default=64)
+    parser.add_argument("--phase2_epochs_scale", type=float, default=1.0,
+                        help="Multiply best_epoch by this factor for Phase 2 retrain "
+                             "(e.g. 0.8, 1.0, 1.2). Set to 0 to skip Phase 2 entirely.")
     args = parser.parse_args()
 
     cfg = load_config(args.config or os.path.join(PROJECT_ROOT, "configs",
@@ -393,6 +396,14 @@ def main():
             best_val_loss = val_loss
             best_epoch = epoch + 1
             epochs_no_improve = 0
+            best_phase1_state = {
+                "img_encoder": {k: v.clone() for k, v in model_img.state_dict().items()},
+                "aux_encoder": {k: v.clone() for k, v in model_aux.state_dict().items()},
+            }
+            if isinstance(distance_fn, nn.Module):
+                best_phase1_state["distance_fn"] = {
+                    k: v.clone() for k, v in distance_fn.state_dict().items()
+                }
         else:
             epochs_no_improve += 1
 
@@ -406,38 +417,59 @@ def main():
     if best_epoch <= 0:
         best_epoch = 1
 
-    # Phase 2: retrain on train+val for best_epoch epochs, evaluate on test
-    print(f"\nPhase 2: retraining on train+val for {best_epoch} epoch(s)...")
-    trainval_ds = CUBPrecomputedDataset(
-        args.data_root, split="trainval",
-        cub_root=cub_root, test_time=False,
-    )
-    print(f"Train+val: {len(trainval_ds.class_names)} classes, {len(trainval_ds)} images")
+    # Evaluate best Phase-1 checkpoint directly on test
+    model_img.load_state_dict(best_phase1_state["img_encoder"])
+    model_aux.load_state_dict(best_phase1_state["aux_encoder"])
+    if isinstance(distance_fn, nn.Module) and "distance_fn" in best_phase1_state:
+        distance_fn.load_state_dict(best_phase1_state["distance_fn"])
 
-    set_seed(args.seed)
-    model_img, model_aux, distance_fn = build_models(aux_dim, args.z_dim, device, dist_cfg)
-    optimizer = build_optimizer(model_img, model_aux, distance_fn, args.lr, weight_decay=1e-5)
-
-    for epoch in range(best_epoch):
-        train_loss, train_acc = run_episodes(
-            model_img, model_aux, trainval_ds.aux_features,
-            optimizer, trainval_ds, device, distance_fn,
-            n_episodes=args.n_episodes, n_way=args.n_way,
-            n_query=args.n_query, do_backward=True,
-        )
-        print(f"[Retrain {epoch+1}/{best_epoch}] loss={train_loss:.4f}  acc={train_acc:.4f}")
-
-    test_mean, test_ci = evaluate_episodic(
-        model_img,
-        model_aux,
-        test_ds.aux_features,
-        test_ds,
-        device,
-        distance_fn,
-        n_episodes=args.test_episodes,
-        n_way=len(test_ds.class_names),
+    p1_mean, p1_ci = evaluate_episodic(
+        model_img, model_aux, test_ds.aux_features, test_ds, device, distance_fn,
+        n_episodes=args.test_episodes, n_way=len(test_ds.class_names),
         n_query=args.n_query,
     )
+    print(
+        f"\nPhase-1 best checkpoint test accuracy ({len(test_ds.class_names)}-way): "
+        f"{p1_mean:.4f} ± {p1_ci:.4f} (95% CI over {args.test_episodes} episodes)"
+    )
+
+    # Phase 2: retrain on train+val
+    phase2_epochs = max(1, round(best_epoch * args.phase2_epochs_scale))
+    skip_phase2 = args.phase2_epochs_scale == 0
+
+    if skip_phase2:
+        print("\nPhase 2 skipped (--phase2_epochs_scale 0)")
+        test_mean, test_ci = p1_mean, p1_ci
+    else:
+        print(
+            f"\nPhase 2: retraining on train+val for {phase2_epochs} epoch(s) "
+            f"(best_epoch={best_epoch} x scale={args.phase2_epochs_scale:.2f})..."
+        )
+        trainval_ds = CUBPrecomputedDataset(
+            args.data_root, split="trainval",
+            cub_root=cub_root, test_time=False,
+        )
+        print(f"Train+val: {len(trainval_ds.class_names)} classes, {len(trainval_ds)} images")
+
+        set_seed(args.seed)
+        model_img, model_aux, distance_fn = build_models(aux_dim, args.z_dim, device, dist_cfg)
+        optimizer = build_optimizer(model_img, model_aux, distance_fn, args.lr, weight_decay=1e-5)
+
+        for epoch in range(phase2_epochs):
+            train_loss, train_acc = run_episodes(
+                model_img, model_aux, trainval_ds.aux_features,
+                optimizer, trainval_ds, device, distance_fn,
+                n_episodes=args.n_episodes, n_way=args.n_way,
+                n_query=args.n_query, do_backward=True,
+            )
+            print(f"[Retrain {epoch+1}/{phase2_epochs}] loss={train_loss:.4f}  acc={train_acc:.4f}")
+
+        test_mean, test_ci = evaluate_episodic(
+            model_img, model_aux, test_ds.aux_features, test_ds, device, distance_fn,
+            n_episodes=args.test_episodes, n_way=len(test_ds.class_names),
+            n_query=args.n_query,
+        )
+
     print(
         f"\nFinal zero-shot test accuracy ({len(test_ds.class_names)}-way): "
         f"{test_mean:.4f} ± {test_ci:.4f} (95% CI over {args.test_episodes} episodes)"
@@ -447,6 +479,8 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     ckpt = {
         "best_epoch": best_epoch,
+        "phase2_epochs": 0 if skip_phase2 else phase2_epochs,
+        "phase2_epochs_scale": args.phase2_epochs_scale,
         "aux_type": "attributes",
         "distance": args.distance,
         "z_dim": args.z_dim,
@@ -454,6 +488,8 @@ def main():
         "aux_encoder": model_aux.state_dict(),
         "test_acc": test_mean,
         "test_ci95": test_ci,
+        "phase1_test_acc": p1_mean,
+        "phase1_test_ci95": p1_ci,
     }
     if isinstance(distance_fn, nn.Module):
         ckpt["distance_fn"] = distance_fn.state_dict()
