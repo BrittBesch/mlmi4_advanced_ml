@@ -18,8 +18,9 @@ Data directory: data/cvpr2016_cub/
 Attributes (paper): data/CUB_200_2011/attributes/class_attribute_labels_continuous.txt
 """
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
@@ -36,8 +37,10 @@ MIDDLE_CROP_IDX = 0
 IMAGE_DIM = 1024
 
 
-def _load_split_names(split_file: Path) -> List[str]:
+def _load_split_names(split_file: Path) -> list[str]:
     """Return list of class folder names (e.g. '001.Black_footed_Albatross') from a split file."""
+    if not split_file.exists():
+        raise FileNotFoundError(f"Split file not found: {split_file}")
     with open(split_file) as f:
         return [line.strip() for line in f if line.strip()]
 
@@ -58,7 +61,7 @@ def _load_class_image_features(class_file: Path) -> np.ndarray:
     return np.array(torchfile.load(str(class_file)), dtype=np.float32)  # (n_imgs, 1024, 10)
 
 
-def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
+def load_cub_attributes(cub_root: str, class_names: list[str]) -> np.ndarray:
     """
     Load 312-dim continuous CUB attributes for the given classes (paper aux modality).
 
@@ -87,6 +90,10 @@ def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
                 ]
             for cls_name in class_names:
                 cls_idx = _class_number(cls_name) - 1   # 0-based row index
+                if cls_idx < 0 or cls_idx >= len(all_rows):
+                    raise ValueError(
+                        f"Class index out of range for attributes: {cls_name} -> {cls_idx + 1}"
+                    )
                 rows.append(all_rows[cls_idx])
             return np.array(rows, dtype=np.float32)   # (n_classes, 312)
     raise FileNotFoundError(
@@ -99,8 +106,8 @@ def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
 def load_split_data(
     data_root: str,
     split: str,
-    cub_root: Optional[str] = None,
-) -> Tuple[List[np.ndarray], np.ndarray, List[str]]:
+    cub_root: str | None = None,
+) -> tuple[list[np.ndarray], np.ndarray, list[str]]:
     """
     Load all image features and class-level auxiliary features for a split.
 
@@ -160,9 +167,9 @@ class CUBPrecomputedDataset(Dataset):
         self,
         data_root: str,
         split: str,
-        cub_root: Optional[str] = None,
+        cub_root: str | None = None,
         test_time: bool = False,
-    ):
+    ) -> None:
         """
         Args:
             data_root: path to cvpr2016_cub directory
@@ -189,7 +196,7 @@ class CUBPrecomputedDataset(Dataset):
     def __len__(self) -> int:
         return len(self.labels)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
         crops = self.features[idx]   # (1024, 10)
         if self.test_time:
             feat = crops[:, MIDDLE_CROP_IDX]
