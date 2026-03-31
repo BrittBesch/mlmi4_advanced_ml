@@ -323,7 +323,6 @@ def build_models(
     device: torch.device,
     distance: DistanceType,
     lowrank_r: int,
-) -> tuple[nn.Module, nn.Module, DistanceFn]:
 ) -> Tuple[nn.Module, nn.Module, DistanceFn]:
     """Construct encoders and configured distance function on device."""
     model_img = LinearImageEncoder(in_dim=IMAGE_DIM, z_dim=z_dim).to(device)
