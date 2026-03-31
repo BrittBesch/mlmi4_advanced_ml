@@ -19,7 +19,7 @@ Attributes (paper): data/CUB_200_2011/attributes/class_attribute_labels_continuo
 """
 
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -38,6 +38,8 @@ IMAGE_DIM = 1024
 
 def _load_split_names(split_file: Path) -> List[str]:
     """Return list of class folder names (e.g. '001.Black_footed_Albatross') from a split file."""
+    if not split_file.exists():
+        raise FileNotFoundError(f"Split file not found: {split_file}")
     with open(split_file) as f:
         return [line.strip() for line in f if line.strip()]
 
@@ -87,6 +89,10 @@ def load_cub_attributes(cub_root: str, class_names: List[str]) -> np.ndarray:
                 ]
             for cls_name in class_names:
                 cls_idx = _class_number(cls_name) - 1   # 0-based row index
+                if cls_idx < 0 or cls_idx >= len(all_rows):
+                    raise ValueError(
+                        f"Class index out of range for attributes: {cls_name} -> {cls_idx + 1}"
+                    )
                 rows.append(all_rows[cls_idx])
             return np.array(rows, dtype=np.float32)   # (n_classes, 312)
     raise FileNotFoundError(
@@ -162,7 +168,7 @@ class CUBPrecomputedDataset(Dataset):
         split: str,
         cub_root: Optional[str] = None,
         test_time: bool = False,
-    ):
+    ) -> None:
         """
         Args:
             data_root: path to cvpr2016_cub directory
